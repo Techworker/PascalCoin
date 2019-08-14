@@ -35,27 +35,31 @@ Uses
   {$ENDIF}
   DBXJSON,
   {$ENDIF}
-  SysUtils, DateUtils, Variants, Classes, ULog;
+  SysUtils, DateUtils, Variants, Classes, ULog,
+  {$IFNDEF FPC}System.Generics.Collections{$ELSE}Generics.Collections{$ENDIF};
 
 Type
   {$IFDEF FPC}
   TJSONValue = TJSONData;
   {$ENDIF}
 
+  { TPCJSONData }
+
   TPCJSONData = Class
   private
     FParent : TPCJSONData;
   protected
-    Function ToJSONFormatted(pretty:Boolean;Const prefix : AnsiString) : AnsiString; virtual; abstract;
+    Function ToJSONFormatted(pretty:Boolean;Const prefix : String) : String; virtual; abstract;
   public
     Constructor Create; virtual;
     Destructor Destroy; override;
     Class Function ParseJSONValue(Const JSONObject : String) : TPCJSONData; overload;
     Class Function ParseJSONValue(Const JSONObject : TBytes) : TPCJSONData; overload;
     Class Function _GetCount : Integer;
-    Function ToJSON(pretty : Boolean) : AnsiString;
+    Function ToJSON(pretty : Boolean) : String;
     Procedure SaveToStream(Stream : TStream);
     Procedure Assign(PCJSONData : TPCJSONData);
+    class function JSONFormatSettings : TFormatSettings;
   End;
 
   TPCJSONDataClass = Class of TPCJSONData;
@@ -69,7 +73,7 @@ Type
     FValue: Variant;
     procedure SetValue(const Value: Variant);
   protected
-    Function ToJSONFormatted(pretty:Boolean;const prefix : AnsiString) : AnsiString; override;
+    Function ToJSONFormatted(pretty:Boolean;const prefix : String) : String; override;
   public
     Constructor Create; override;
     Constructor CreateFromJSONValue(JSONValue : TJSONValue);
@@ -92,7 +96,7 @@ Type
     FFreeValue : Boolean;
     procedure SetValue(const Value: TPCJSONData);
   protected
-    Function ToJSONFormatted(pretty:Boolean;const prefix : AnsiString) : AnsiString; override;
+    Function ToJSONFormatted(pretty:Boolean;const prefix : String) : String; override;
   public
     Constructor Create(AName : String);
     Destructor Destroy; override;
@@ -105,7 +109,7 @@ Type
 
   TPCJSONList = Class(TPCJSONData)
   private
-    FList : TList;
+    FList : TList<TPCJSONData>;
     function GetItems(Index: Integer): TPCJSONData;
     procedure SetItems(Index: Integer; const Value: TPCJSONData);
   protected
@@ -128,7 +132,7 @@ Type
     Procedure GrowToIndex(index : Integer);
     function GetItemOfType(Index: Integer; DataClass:TPCJSONDataClass): TPCJSONData;
   protected
-    Function ToJSONFormatted(pretty:Boolean;const prefix : AnsiString) : AnsiString; override;
+    Function ToJSONFormatted(pretty:Boolean;const prefix : String) : String; override;
   public
     Constructor Create; override;
     Constructor CreateFromJSONArray(JSONArray : TJSONArray);
@@ -145,7 +149,7 @@ Type
     Function GetIndexOrCreateName(Name : String) : Integer;
     Function GetByName(Name : String) : TPCJSONNameValue;
   protected
-    Function ToJSONFormatted(pretty:Boolean;const prefix : AnsiString) : AnsiString; override;
+    Function ToJSONFormatted(pretty:Boolean;const prefix : String) : String; override;
     Procedure CheckCanInsert(Index:Integer; PCJSONData:TPCJSONData); override;
     Procedure CheckValidName(Name : String);
   public
@@ -177,31 +181,33 @@ Type
 
 implementation
 
+var _JSON_FormatSettings : TFormatSettings;
+
 Function UTF8JSONEncode(plainTxt : String; includeSeparator : Boolean) : String;
-Var ws : WideString;
+Var ws : String;
   i : Integer;
 Begin
    ws := UTF8Encode(plainTxt);
    {ALERT:
     UTF8Encode function deletes last char if equal to #0, so we put it manually
     }
-   if copy(plainTxt,length(plainTxt),1)=#0 then ws := ws + #0;
-        i := 1;
+   if plainTxt.Substring(Length(plainTxt)-1,1)=#0 then  ws := ws + #0;
+        i := 0;
         result := '"';
-        while i <= length(ws) do
+        while i < Length(ws) do
           begin
-            case ws[i] of
-              '/', '\', '"': result := result + '\' + ws[i];
+            case ws.Chars[i] of
+              '/', '\', '"': result := result + '\' + ws.Chars[i];
               #8: result := result + '\b';
               #9: result := result + '\t';
               #10: result := result + '\n';
               #13: result := result + '\r';
               #12: result := result + '\f';
             else
-              if (ord(ws[i]) < 32) Or (ord(ws[i])>122) then
-                result := result + '\u' + inttohex(ord(ws[i]), 4)
+              if (ord(ws.Chars[i]) < 32) Or (ord(ws.Chars[i])>122) then
+                result := result + '\u' + inttohex(ord(ws.Chars[i]), 4)
               else
-                result := result + ws[i];
+                result := result + ws.Chars[i];
             end;
             inc(i);
           end;
@@ -283,7 +289,7 @@ begin
   While (index>=Count) do Insert(Count,TPCJSONVariantValue.Create);
 end;
 
-function TPCJSONArray.ToJSONFormatted(pretty: Boolean; const prefix: AnsiString): AnsiString;
+function TPCJSONArray.ToJSONFormatted(pretty: Boolean; const prefix: String): String;
 Var i : Integer;
 begin
   If pretty then Result := prefix+'['
@@ -319,7 +325,7 @@ constructor TPCJSONList.Create;
 begin
   inherited;
   FParent := Nil;
-  FList := TList.Create;
+  FList := TList<TPCJSONData>.Create;
 end;
 
 procedure TPCJSONList.Delete(index: Integer);
@@ -503,7 +509,7 @@ begin
   {$ELSE}
   if JSONValue is TJSONNumber then begin
     d := TJSONNumber(JSONValue).AsDouble;
-    if Pos('.',JSONValue.ToString)>0 then i64 := 0
+    if JSONValue.ToString.IndexOf('.')>=0 then i64 := 0
     else i64 := TJSONNumber(JSONValue).AsInt;
     ds := {$IFDEF DELPHIXE}FormatSettings.{$ENDIF}DecimalSeparator;
     ts := {$IFDEF DELPHIXE}FormatSettings.{$ENDIF}ThousandSeparator;
@@ -535,7 +541,7 @@ begin
   FValue := Value;
 end;
 
-function TPCJSONVariantValue.ToJSONFormatted(pretty: Boolean; const prefix: AnsiString): AnsiString;
+function TPCJSONVariantValue.ToJSONFormatted(pretty: Boolean; const prefix: String): String;
 Var   ds,ts : Char;
 begin
   Case VarType(Value) of
@@ -717,11 +723,11 @@ end;
 procedure TPCJSONObject.CheckValidName(Name: String);
 Var i : Integer;
 begin
-  for i := 1 to Length(Name) do begin
-    if i=1 then begin
-      if Not (Name[i] in ['a'..'z','A'..'Z','0'..'9','_','.']) then raise Exception.Create(Format('Invalid char %s at pos %d/%d',[Name[i],i,length(Name)]));
+  for i := 0 to Length(Name)-1 do begin
+    if i=0 then begin
+      if Not (Name.Chars[i] in ['a'..'z','A'..'Z','0'..'9','_','.']) then raise Exception.Create(Format('Invalid char %s at pos %d/%d',[Name.Chars[i],i+1,length(Name)]));
     end else begin
-      if Not (Name[i] in ['a'..'z','A'..'Z','0'..'9','_','-','.']) then raise Exception.Create(Format('Invalid char %s at pos %d/%d',[Name[i],i,length(Name)]));
+      if Not (Name.Chars[i] in ['a'..'z','A'..'Z','0'..'9','_','-','.']) then raise Exception.Create(Format('Invalid char %s at pos %d/%d',[Name.Chars[i],i+1,length(Name)]));
     end;
   end;
 end;
@@ -873,21 +879,21 @@ begin
 end;
 
 function TPCJSONObject.LoadAsStream(ParamName: String; Stream: TStream): Integer;
-Var s : AnsiString;
+Var s : RawByteString;
 begin
   s := AsString(ParamName,'');
   if (s<>'') then begin
-    Stream.Write(s[1],length(s));
+    Stream.Write(s[Low(s)],length(s));
   end;
   Result := Length(s);
 end;
 
 function TPCJSONObject.SaveAsStream(ParamName: String; Stream: TStream): Integer;
-Var s : AnsiString;
+Var s : RawByteString;
 begin
   Stream.Position := 0;
   SetLength(s,Stream.Size);
-  Stream.Read(s[1],Stream.Size);
+  Stream.Read(s[Low(s)],Stream.Size);
   GetAsVariant(ParamName).Value := s;
 end;
 
@@ -903,7 +909,7 @@ begin
   NV.FFreeValue := false;
 end;
 
-function TPCJSONObject.ToJSONFormatted(pretty: Boolean; const prefix: AnsiString): AnsiString;
+function TPCJSONObject.ToJSONFormatted(pretty: Boolean; const prefix: String): String;
 Var i : Integer;
 begin
   if pretty then Result := prefix+'{'
@@ -944,7 +950,7 @@ begin
   FFreeValue := true;
 end;
 
-function TPCJSONNameValue.ToJSONFormatted(pretty: Boolean; const prefix: AnsiString): AnsiString;
+function TPCJSONNameValue.ToJSONFormatted(pretty: Boolean; const prefix: String): String;
 begin
   if pretty then Result := prefix else Result := '';
   Result := Result + UTF8JSONEncode(name,true)+':'+Value.ToJSONFormatted(pretty,prefix+'   ');
@@ -958,7 +964,7 @@ procedure TPCJSONData.Assign(PCJSONData: TPCJSONData);
 Var i : Integer;
   NV : TPCJSONNameValue;
   JSOND : TPCJSONData;
-  s : AnsiString;
+  s : String;
 begin
   if Not Assigned(PCJSONData) then Abort;
   if (PCJSONData is TPCJSONObject) AND (Self is TPCJSONObject) then begin
@@ -997,7 +1003,14 @@ begin
   inherited;
 end;
 
-class function TPCJSONData.ParseJSONValue(Const JSONObject: TBytes): TPCJSONData;
+class function TPCJSONData.JSONFormatSettings: TFormatSettings;
+begin
+  Result := _JSON_FormatSettings;
+end;
+
+
+class function TPCJSONData.ParseJSONValue(const JSONObject: TBytes
+  ): TPCJSONData;
 Var JS : TJSONValue;
   {$IFDEF FPC}
   jss : TJSONStringType;
@@ -1040,18 +1053,19 @@ begin
 end;
 
 procedure TPCJSONData.SaveToStream(Stream: TStream);
-Var s : AnsiString;
+Var s : RawByteString;
 begin
   s := ToJSON(false);
-  Stream.Write(s[1],length(s));
+  Stream.Write(s[Low(s)],Length(s));
 end;
 
-class function TPCJSONData.ParseJSONValue(Const JSONObject: String): TPCJSONData;
+class function TPCJSONData.ParseJSONValue(const JSONObject: String
+  ): TPCJSONData;
 begin
   Result := ParseJSONValue( TEncoding.ASCII.GetBytes(JSONObject) );
 end;
 
-function TPCJSONData.ToJSON(pretty: Boolean): AnsiString;
+function TPCJSONData.ToJSON(pretty: Boolean): String;
 begin
   Result := ToJSONFormatted(pretty,'');
 end;
@@ -1063,4 +1077,7 @@ end;
 
 initialization
   _objectsCount := 0;
+  _JSON_FormatSettings := FormatSettings;
+  _JSON_FormatSettings.ThousandSeparator := ',';
+  _JSON_FormatSettings.DecimalSeparator := '.';
 end.

@@ -5,6 +5,9 @@ unit HlpBlake2BIvBuilder;
 interface
 
 uses
+{$IFDEF DELPHI}
+  HlpBitConverter,
+{$ENDIF DELPHI}
   HlpConverters,
   HlpBlake2BTreeConfig,
   HlpIBlake2BConfig,
@@ -18,6 +21,8 @@ resourcestring
   SInvalidPersonalisationLength =
     '"Personalisation" Length Must Be Equal To 16';
   SInvalidSaltLength = '"Salt" Length Must Be Equal To 16';
+  STreeIncorrectInnerHashSize =
+    'Tree Inner Hash Size Must Not Be Greater Than 64';
 
 type
   TBlake2BIvBuilder = class sealed(TObject)
@@ -27,14 +32,14 @@ type
 
       FSequentialTreeConfig: IBlake2BTreeConfig;
 
+    class procedure VerifyConfigB(const AConfig: IBlake2BConfig;
+      const ATreeConfig: IBlake2BTreeConfig; AIsSequential: Boolean); static;
+
     class constructor Blake2BIvBuilder();
 
   public
-    class function ConfigB(const config: IBlake2BConfig;
-      const treeConfig: IBlake2BTreeConfig): THashLibUInt64Array; static;
-
-    class procedure ConfigBSetNode(const rawConfig: THashLibUInt64Array;
-      depth: Byte; nodeOffset: UInt64); static; inline;
+    class function ConfigB(const AConfig: IBlake2BConfig;
+      var ATreeConfig: IBlake2BTreeConfig): THashLibUInt64Array; static;
 
   end;
 
@@ -42,100 +47,118 @@ implementation
 
 { TBlake2BIvBuilder }
 
-class constructor TBlake2BIvBuilder.Blake2BIvBuilder;
+class procedure TBlake2BIvBuilder.VerifyConfigB(const AConfig: IBlake2BConfig;
+  const ATreeConfig: IBlake2BTreeConfig; AIsSequential: Boolean);
 begin
-  FSequentialTreeConfig := TBlake2BTreeConfig.Create();
-  FSequentialTreeConfig.IntermediateHashSize := 0;
-  FSequentialTreeConfig.LeafSize := 0;
-  FSequentialTreeConfig.FanOut := 1;
-  FSequentialTreeConfig.MaxHeight := 1;
-end;
-
-class function TBlake2BIvBuilder.ConfigB(const config: IBlake2BConfig;
-  const treeConfig: IBlake2BTreeConfig): THashLibUInt64Array;
-var
-  isSequential: Boolean;
-  LtreeConfig: IBlake2BTreeConfig;
-  rawConfig: THashLibUInt64Array;
-begin
-  LtreeConfig := treeConfig;
-  isSequential := LtreeConfig = Nil;
-  if (isSequential) then
-  begin
-    LtreeConfig := FSequentialTreeConfig;
-  end;
-  System.SetLength(rawConfig, 8);
 
   // digest length
-  if ((config.HashSize <= 0) or (config.HashSize > 64)) then
+  if ((AConfig.HashSize <= 0) or (AConfig.HashSize > 64)) then
   begin
     raise EArgumentOutOfRangeHashLibException.CreateRes(@SInvalidHashSize);
   end;
 
-  rawConfig[0] := rawConfig[0] or (UInt64(UInt32(config.HashSize)));
-
   // Key length
-  if (config.Key <> Nil) then
+  if (AConfig.Key <> Nil) then
   begin
-    if (System.Length(config.Key) > 64) then
+    if (System.Length(AConfig.Key) > 64) then
     begin
       raise EArgumentOutOfRangeHashLibException.CreateRes(@SInvalidKeyLength);
     end;
-    rawConfig[0] := rawConfig[0] or
-      UInt64(UInt32(System.Length(config.Key)) shl 8);
   end;
 
-  // FanOut
-  rawConfig[0] := rawConfig[0] or (UInt32(LtreeConfig.FanOut) shl 16);
-  // Depth
-  rawConfig[0] := rawConfig[0] or (UInt32(LtreeConfig.MaxHeight) shl 24);
-  // Leaf length
-  rawConfig[0] := rawConfig[0] or
-    ((UInt64(UInt32(LtreeConfig.LeafSize))) shl 32);
-
-  // Inner length
-  if ((not isSequential) and ((LtreeConfig.IntermediateHashSize <= 0) or
-    (LtreeConfig.IntermediateHashSize > 64))) then
+  // Salt length
+  if (AConfig.Salt <> Nil) then
   begin
-    raise EArgumentOutOfRangeHashLibException.Create
-      ('treeConfig.TreeIntermediateHashSize');
-  end;
-  rawConfig[2] := rawConfig[2] or
-    (UInt32(LtreeConfig.IntermediateHashSize) shl 8);
-
-  // Salt
-  if (config.Salt <> Nil) then
-  begin
-    if (System.Length(config.Salt) <> 16) then
+    if (System.Length(AConfig.Salt) <> 16) then
     begin
       raise EArgumentOutOfRangeHashLibException.CreateRes(@SInvalidSaltLength);
     end;
-    rawConfig[4] := TConverters.ReadBytesAsUInt64LE(PByte(config.Salt), 0);
-    rawConfig[5] := TConverters.ReadBytesAsUInt64LE(PByte(config.Salt), 8);
   end;
 
-  // Personalisation
-  if (config.Personalisation <> Nil) then
+  // Personalisation length
+  if (AConfig.Personalisation <> Nil) then
   begin
-    if (System.Length(config.Personalisation) <> 16) then
+    if (System.Length(AConfig.Personalisation) <> 16) then
     begin
       raise EArgumentOutOfRangeHashLibException.CreateRes
         (@SInvalidPersonalisationLength);
     end;
-    rawConfig[6] := TConverters.ReadBytesAsUInt64LE
-      (PByte(config.Personalisation), 0);
-    rawConfig[7] := TConverters.ReadBytesAsUInt64LE
-      (PByte(config.Personalisation), 8);
   end;
 
-  result := rawConfig;
+  // Tree InnerHashSize
+  if (ATreeConfig <> Nil) then
+  begin
+
+    if ((not AIsSequential) and ((ATreeConfig.InnerHashSize <= 0))) then
+    begin
+      raise EArgumentOutOfRangeHashLibException.Create
+        ('treeConfig.TreeIntermediateHashSize');
+    end;
+
+    if (ATreeConfig.InnerHashSize > 64) then
+    begin
+      raise EArgumentOutOfRangeHashLibException.CreateRes
+        (@STreeIncorrectInnerHashSize);
+    end;
+  end;
+
 end;
 
-class procedure TBlake2BIvBuilder.ConfigBSetNode(const rawConfig
-  : THashLibUInt64Array; depth: Byte; nodeOffset: UInt64);
+class constructor TBlake2BIvBuilder.Blake2BIvBuilder;
 begin
-  rawConfig[1] := nodeOffset;
-  rawConfig[2] := (rawConfig[2] and (not UInt64($FF))) or depth;
+  FSequentialTreeConfig := TBlake2BTreeConfig.Create();
+  FSequentialTreeConfig.FanOut := 1;
+  FSequentialTreeConfig.MaxDepth := 1;
+  FSequentialTreeConfig.LeafSize := 0;
+  FSequentialTreeConfig.NodeOffset := 0;
+  FSequentialTreeConfig.NodeDepth := 0;
+  FSequentialTreeConfig.InnerHashSize := 0;
+  FSequentialTreeConfig.IsLastNode := False;
+end;
+
+class function TBlake2BIvBuilder.ConfigB(const AConfig: IBlake2BConfig;
+  var ATreeConfig: IBlake2BTreeConfig): THashLibUInt64Array;
+var
+  LIsSequential: Boolean;
+  LBuffer: THashLibByteArray;
+begin
+  LIsSequential := ATreeConfig = Nil;
+  if (LIsSequential) then
+  begin
+    ATreeConfig := FSequentialTreeConfig;
+  end;
+
+  VerifyConfigB(AConfig, ATreeConfig, LIsSequential);
+
+  System.SetLength(LBuffer, 64);
+
+  LBuffer[0] := AConfig.HashSize;
+  LBuffer[1] := System.Length(AConfig.Key);
+
+  if ATreeConfig <> Nil then
+  begin
+    LBuffer[2] := ATreeConfig.FanOut;
+    LBuffer[3] := ATreeConfig.MaxDepth;
+    TConverters.ReadUInt32AsBytesLE(ATreeConfig.LeafSize, LBuffer, 4);
+    TConverters.ReadUInt64AsBytesLE(ATreeConfig.NodeOffset, LBuffer, 8);
+    LBuffer[16] := ATreeConfig.NodeDepth;
+    LBuffer[17] := ATreeConfig.InnerHashSize;
+  end;
+
+  if AConfig.Salt <> Nil then
+  begin
+    System.Move(AConfig.Salt[0], LBuffer[32], 16 * System.SizeOf(Byte));
+  end;
+
+  if AConfig.Personalisation <> Nil then
+  begin
+    System.Move(AConfig.Personalisation[0], LBuffer[48],
+      16 * System.SizeOf(Byte));
+  end;
+
+  System.SetLength(Result, 8);
+  TConverters.le64_copy(PByte(LBuffer), 0, PUInt64(Result), 0,
+    System.Length(LBuffer) * System.SizeOf(Byte));
 end;
 
 end.

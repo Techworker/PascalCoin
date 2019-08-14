@@ -40,7 +40,9 @@ type
 
   TFRMPascalCoinWalletConfig = class(TForm)
     cbJSONRPCMinerServerActive: TCheckBox;
+    cbDownloadNewCheckpoint: TCheckBox;
     ebDefaultFee: TEdit;
+    ebMinFutureBlocksToDownloadNewSafebox: TEdit;
     Label1: TLabel;
     cbSaveLogFiles: TCheckBox;
     cbShowLogs: TCheckBox;
@@ -70,6 +72,7 @@ type
     ebJSONRPCAllowedIPs: TEdit;
     Label6: TLabel;
     Label7: TLabel;
+    procedure cbDownloadNewCheckpointClick(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure bbOkClick(Sender: TObject);
     procedure bbUpdatePasswordClick(Sender: TObject);
@@ -91,7 +94,7 @@ type
 
 implementation
 
-uses UConst, UAccounts, ULog, UCrypto, UFolderHelper, USettings;
+uses UConst, UAccounts, ULog, UCrypto, UFolderHelper, USettings, UGUIUtils, UNetProtocol;
 
 {$IFnDEF FPC}
   {$R *.dfm}
@@ -120,7 +123,7 @@ begin
     if cbPrivateKeyToMine.ItemIndex<0 then raise Exception.Create('Must select a private key');
     i := PtrInt(cbPrivateKeyToMine.Items.Objects[cbPrivateKeyToMine.ItemIndex]);
     if (i<0) Or (i>=FWalletKeys.Count) then raise Exception.Create('Invalid private key');
-    AppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].SetAsString( TAccountComp.AccountKey2RawString( FWalletKeys.Key[i].AccountKey ) );
+    AppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].SetAsTBytes( TAccountComp.AccountKey2RawString( FWalletKeys.Key[i].AccountKey ) );
   end else mpk := mpk_Random;
 
   AppParams.ParamByName[CT_PARAM_MinerPrivateKeyType].SetAsInteger(integer(mpk));
@@ -133,6 +136,11 @@ begin
   AppParams.ParamByName[CT_PARAM_JSONRPCMinerServerPort].SetAsInteger(udJSONRPCMinerServerPort.Position);
   AppParams.ParamByName[CT_PARAM_JSONRPCEnabled].SetAsBoolean(cbJSONRPCPortEnabled.Checked);
   AppParams.ParamByName[CT_PARAM_JSONRPCAllowedIPs].SetAsString(ebJSONRPCAllowedIPs.Text);
+  if cbDownloadNewCheckpoint.Checked then begin
+    i := StrToIntDef(ebMinFutureBlocksToDownloadNewSafebox.Text,0);
+    AppParams.ParamByName[CT_PARAM_MinFutureBlocksToDownloadNewSafebox].SetAsInteger(i);
+    AppParams.ParamByName[CT_PARAM_AllowDownloadNewCheckpointIfOlderThan].SetAsBoolean(i>200);
+  end else AppParams.ParamByName[CT_PARAM_AllowDownloadNewCheckpointIfOlderThan].SetAsBoolean(False);
 
   ModalResult := MrOk;
 end;
@@ -153,16 +161,16 @@ begin
   if Not FWalletKeys.IsValidPassword then begin
     s := '';
     Repeat
-      if Not InputQuery('Wallet Password','Insert Wallet Password',s) then exit;
+      if Not InputQueryPassword('Wallet Password','Insert Wallet Password',s) then exit;
       FWalletKeys.WalletPassword := s;
       if Not FWalletKeys.IsValidPassword then Application.MessageBox(PChar('Invalid password'),PChar(Application.Title),MB_ICONERROR+MB_OK);
     Until FWalletKeys.IsValidPassword;
   end;
   if FWalletKeys.IsValidPassword then begin
     s := ''; s2 := '';
-    if Not InputQuery('Change password','Type new password',s) then exit;
+    if Not InputQueryPassword('Change password','Type new password',s) then exit;
     if trim(s)<>s then raise Exception.Create('Password cannot start or end with a space character');
-    if Not InputQuery('Change password','Type new password again',s2) then exit;
+    if Not InputQueryPassword('Change password','Type new password again',s2) then exit;
     if s<>s2 then raise Exception.Create('Two passwords are different!');
 
     FWalletKeys.WalletPassword := s;
@@ -193,6 +201,15 @@ begin
   bbUpdatePassword.Enabled := false;
   UpdateWalletConfig;
   lblDefaultJSONRPCMinerServerPort.Caption := Format('(Default %d)',[CT_JSONRPCMinerServer_Port]);
+  {$ifdef fpc}{$ifdef darwin}
+  Caption:='Preferences';
+  {$endif}{$endif}
+end;
+
+procedure TFRMPascalCoinWalletConfig.cbDownloadNewCheckpointClick(
+  Sender: TObject);
+begin
+  UpdateWalletConfig;
 end;
 
 procedure TFRMPascalCoinWalletConfig.SetAppParams(const Value: TAppParams);
@@ -219,6 +236,8 @@ begin
     udJSONRPCMinerServerPort.Position := AppParams.ParamByName[CT_PARAM_JSONRPCMinerServerPort].GetAsInteger(CT_JSONRPCMinerServer_Port);
     cbJSONRPCPortEnabled.Checked := AppParams.ParamByName[CT_PARAM_JSONRPCEnabled].GetAsBoolean(false);
     ebJSONRPCAllowedIPs.Text := AppParams.ParamByName[CT_PARAM_JSONRPCAllowedIPs].GetAsString('127.0.0.1;');
+    ebMinFutureBlocksToDownloadNewSafebox.Text := IntToStr(AppParams.ParamByName[CT_PARAM_MinFutureBlocksToDownloadNewSafebox].GetAsInteger(TNetData.NetData.MinFutureBlocksToDownloadNewSafebox));
+    cbDownloadNewCheckpoint.Checked:= AppParams.ParamByName[CT_PARAM_AllowDownloadNewCheckpointIfOlderThan].GetAsBoolean(TNetData.NetData.MinFutureBlocksToDownloadNewSafebox>200);
   Except
     On E:Exception do begin
       TLog.NewLog(lterror,ClassName,'Exception at SetAppParams: '+E.Message);
@@ -226,6 +245,7 @@ begin
   End;
   cbSaveLogFilesClick(nil);
   cbJSONRPCPortEnabledClick(nil);
+  UpdateWalletConfig;
 end;
 
 procedure TFRMPascalCoinWalletConfig.SetWalletKeys(const Value: TWalletKeys);
@@ -237,8 +257,9 @@ end;
 
 procedure TFRMPascalCoinWalletConfig.UpdateWalletConfig;
 Var i, iselected : Integer;
-  s : String;
+  raw : TBytes;
   wk : TWalletKey;
+  auxs : String;
 begin
   if Assigned(FWalletKeys) then begin
     if FWalletKeys.IsValidPassword then begin
@@ -254,18 +275,18 @@ begin
     for i := 0 to FWalletKeys.Count - 1 do begin
       wk := FWalletKeys.Key[i];
       if (wk.Name='') then begin
-        s := TCrypto.ToHexaString( TAccountComp.AccountKey2RawString(wk.AccountKey));
+        auxs := TCrypto.ToHexaString( TAccountComp.AccountKey2RawString(wk.AccountKey));
       end else begin
-        s := wk.Name;
+        auxs := wk.Name;
       end;
-      if wk.CryptedKey<>'' then begin
-        cbPrivateKeyToMine.Items.AddObject(s,TObject(i));
+      if (Length(wk.CryptedKey)>0) then begin
+        cbPrivateKeyToMine.Items.AddObject(auxs,TObject(i));
       end;
     end;
     cbPrivateKeyToMine.Sorted := true;
     if Assigned(FAppParams) then begin
-      s := FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].GetAsString('');
-      iselected := FWalletKeys.IndexOfAccountKey(TAccountComp.RawString2Accountkey(s));
+      raw := FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].GetAsTBytes(Nil);
+      iselected := FWalletKeys.IndexOfAccountKey(TAccountComp.RawString2Accountkey(raw));
       if iselected>=0 then begin
         iselected :=  cbPrivateKeyToMine.Items.IndexOfObject(TObject(iselected));
         cbPrivateKeyToMine.ItemIndex := iselected;
@@ -275,6 +296,7 @@ begin
 
   end else bbUpdatePassword.Caption := '(Wallet password)';
   bbUpdatePassword.Enabled := Assigned(FWAlletKeys);
+  ebMinFutureBlocksToDownloadNewSafebox.Enabled:=cbDownloadNewCheckpoint.Checked;
 end;
 
 end.

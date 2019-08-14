@@ -51,6 +51,8 @@ const
   CT_PARAM_JSONRPCAllowedIPs = 'JSONRPCAllowedIPs';
   CT_PARAM_HashRateAvgBlocksCount = 'HashRateAvgBlocksCount';
   CT_PARAM_ShowHashRateAs = 'ShowHashRateAs';
+  CT_PARAM_AllowDownloadNewCheckpointIfOlderThan = 'AllowDownloadNewCheckpointIfOlderThan';
+  CT_PARAM_MinFutureBlocksToDownloadNewSafebox = 'MinFutureBlocksToDownloadNewSafebox';
 
 type
 
@@ -64,16 +66,20 @@ type
     private
       class var FOnChanged : TNotifyManyEvent;
       class var FAppParams : TAppParams;
+      class function GetAllowDownloadNewCheckpointIfOlderThan: Boolean; static;
       class function GetInternetServerPort : Integer; static;
+      class function GetMinFutureBlocksToDownloadNewSafebox: Integer; static;
+      class procedure SetAllowDownloadNewCheckpointIfOlderThan(ABool: Boolean); static;
       class procedure SetInternetServerPort(AInt:Integer); static;
       class function GetRpcPortEnabled : boolean; static;
+      class procedure SetMinFutureBlocksToDownloadNewSafebox(AInt: Integer); static;
       class procedure SetRpcPortEnabled(ABool: boolean); static;
       class function GetDefaultFee : Int64; static;
       class procedure SetDefaultFee(AInt64: Int64); static;
       class function GetMinerPrivateKeyType : TMinerPrivateKeyType; static;
       class procedure SetMinerPrivateKeyType(AType: TMinerPrivateKeyType); static;
-      class function GetMinerSelectedPrivateKey : string; static;
-      class procedure SetMinerSelectedPrivateKey(AKey:string); static;
+      class function GetMinerSelectedPrivateKey : TRawBytes; static;
+      class procedure SetMinerSelectedPrivateKey(AKey:TRawBytes); static;
       class function GetMinerServerRpcActive : boolean; static;
       class procedure SetMinerServerRpcActive(ABool: Boolean); static;
       class function GetMinerServerRpcPort : Integer; static;
@@ -107,7 +113,7 @@ type
       class property RpcAllowedIPs : string read GetRpcAllowedIPs write SetRpcAllowedIPs;
       class property DefaultFee : Int64 read GetDefaultFee write SetDefaultFee;
       class property MinerPrivateKeyType : TMinerPrivateKeyType read GetMinerPrivateKeyType write SetMinerPrivateKeyType;
-      class property MinerSelectedPrivateKey : string read GetMinerSelectedPrivateKey write SetMinerSelectedPrivateKey;
+      class property MinerSelectedPrivateKey : TRawBytes read GetMinerSelectedPrivateKey write SetMinerSelectedPrivateKey;
       class property MinerServerRpcActive : boolean read GetMinerServerRpcActive write SetMinerServerRpcActive;
       class property MinerServerRpcPort : Integer read GetMinerServerRpcPort write SetMinerServerRpcPort;
       class property SaveLogFiles : boolean read GetSaveLogFiles write SetSaveLogFiles;
@@ -118,6 +124,8 @@ type
       class property ShowModalMessages : boolean read GetShowModalMessages write SetShowModalMessages;
       class property PeerCache : string read GetPeerCache write SetPeerCache;
       class property TryConnectOnlyWithThisFixedServers : string read GetTryConnectOnlyWithThisFixedServers write SetTryConnectOnlyWithThisFixedServers;
+      class property MinFutureBlocksToDownloadNewSafebox : Integer read GetMinFutureBlocksToDownloadNewSafebox write SetMinFutureBlocksToDownloadNewSafebox;
+      class property AllowDownloadNewCheckpointIfOlderThan : Boolean read GetAllowDownloadNewCheckpointIfOlderThan write SetAllowDownloadNewCheckpointIfOlderThan;
       class property AppParams : TAppParams read FAppParams;
   end;
 
@@ -146,6 +154,24 @@ begin
   Result := FAppParams.ParamByName[CT_PARAM_InternetServerPort].GetAsInteger(CT_NetServer_Port);
 end;
 
+class function TSettings.GetAllowDownloadNewCheckpointIfOlderThan: Boolean;
+begin
+  CheckLoaded;
+  Result := FAppParams.ParamByName[CT_PARAM_AllowDownloadNewCheckpointIfOlderThan].GetAsBoolean(False);
+end;
+
+class function TSettings.GetMinFutureBlocksToDownloadNewSafebox: Integer;
+begin
+  CheckLoaded;
+  Result := FAppParams.ParamByName[CT_PARAM_MinFutureBlocksToDownloadNewSafebox].GetAsInteger(0);
+end;
+
+class procedure TSettings.SetAllowDownloadNewCheckpointIfOlderThan(ABool: Boolean);
+begin
+  CheckLoaded;
+  FAppParams.ParamByName[CT_PARAM_AllowDownloadNewCheckpointIfOlderThan].SetAsBoolean(ABool);
+end;
+
 class procedure TSettings.SetInternetServerPort(AInt:Integer);
 begin
   CheckLoaded;
@@ -156,6 +182,12 @@ class function TSettings.GetRpcPortEnabled : boolean;
 begin
   CheckLoaded;
   Result := FAppParams.ParamByName[CT_PARAM_JSONRPCEnabled].GetAsBoolean(false);
+end;
+
+class procedure TSettings.SetMinFutureBlocksToDownloadNewSafebox(AInt: Integer);
+begin
+  CheckLoaded;
+  FAppParams.ParamByName[CT_PARAM_MinFutureBlocksToDownloadNewSafebox].SetAsInteger(AInt);
 end;
 
 class procedure TSettings.SetRpcPortEnabled(ABool: boolean);
@@ -224,16 +256,16 @@ begin
   FAppParams.ParamByName[CT_PARAM_MinerPrivateKeyType].SetAsInteger(Integer(AType));
 end;
 
-class function TSettings.GetMinerSelectedPrivateKey : string;
+class function TSettings.GetMinerSelectedPrivateKey : TRawBytes;
 begin
   CheckLoaded;
-  Result := FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].GetAsString('');
+  Result := FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].GetAsTBytes(Nil);
 end;
 
-class procedure TSettings.SetMinerSelectedPrivateKey(AKey:string);
+class procedure TSettings.SetMinerSelectedPrivateKey(AKey:TRawBytes);
 begin
   CheckLoaded;
-  FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].SetAsString(AKey);
+  FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].SetAsTBytes(AKey);
 end;
 
 class function TSettings.GetSaveLogFiles : boolean;
@@ -349,9 +381,6 @@ initialization
 finalization
   if Assigned(TSettings.FAppParams) then
     FreeAndNil(TSettings.FAppParams);
-  if Assigned(TSettings.FOnChanged) then
-    FreeAndNil(TSettings.FOnChanged);
-
 end.
 
 

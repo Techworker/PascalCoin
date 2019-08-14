@@ -26,11 +26,12 @@ uses
   {$ELSE}{$IFDEF LINUX} {$linklib c} ctypes, {$ENDIF LINUX}
   {$IFDEF WINDOWS} Windows, {$ENDIF WINDOWS}
   {$IF DEFINED(DARWIN) OR DEFINED(FREEBSD)} ctypes, sysctl, {$ENDIF}
-  {$ENDIF} Variants, math, typinfo, UMemory;
+  {$ENDIF} Variants, math, typinfo, UMemory, syncobjs;
 
 { CONSTANTS }
 
 const
+  EPSILON : Double = 0.00001;
   MillisPerSecond = 1000;
   MillisPerMinute = 60 * MillisPerSecond;
   MillisPerHour = 60 * MillisPerMinute;
@@ -42,13 +43,18 @@ const
 
 { GLOBAL HELPER FUNCTIONS }
 
-function String2Hex(const Buffer: AnsiString): AnsiString;
-function Hex2Bytes(const AHexString: AnsiString): TBytes; overload;
-function TryHex2Bytes(const AHexString: AnsiString; out ABytes : TBytes): boolean; overload;
-function Bytes2Hex(const ABytes: TBytes; AUsePrefix : boolean = false) : AnsiString;
+
+function String2Hex(const Buffer: String): String;
+function Hex2Bytes(const AHexString: String): TBytes; overload;
+function TryHex2Bytes(const AHexString: String; out ABytes : TBytes): boolean; overload;
+function Bytes2Hex(const ABytes: TBytes; AUsePrefix : boolean = false) : String;
 function BinStrComp(const Str1, Str2 : String): Integer; // Binary-safe StrComp replacement. StrComp will return 0 for when str1 and str2 both start with NUL character.
 function BytesCompare(const ABytes1, ABytes2: TBytes): integer;
-function BytesEqual(const ABytes1, ABytes2 : TBytes) : boolean; inline;
+function BytesEqual(const ABytes1, ABytes2 : TBytes) : boolean; overload; inline;
+function BytesEqual(const ABytes1, ABytes2 : TBytes; AFrom, ALength : UInt32) : boolean; overload; inline;
+function SetLastDWordLE(const ABytes: TBytes; AValue: UInt32): TBytes;
+function GetLastDWordLE(const ABytes: TBytes) : UInt32;
+function GetDWordLE(const ABytes: TBytes; AOffset : Integer) : UInt32;
 function IIF(const ACondition: Boolean; const ATrueResult, AFalseResult: Cardinal): Cardinal; overload;
 function IIF(const ACondition: Boolean; const ATrueResult, AFalseResult: Integer): Integer; overload;
 function IIF(const ACondition: Boolean; const ATrueResult, AFalseResult: Int64): Int64; overload;
@@ -60,6 +66,9 @@ function IIF(const ACondition: Boolean; const ATrueResult, AFalseResult: variant
 function ClipValue( AValue, MinValue, MaxValue: Integer) : Integer;
 function MinValue(const AArray : array of Cardinal) : Cardinal;
 function MaxValue(const AArray : array of Cardinal) : Cardinal;
+function RoundEx(const AInput: Single; APlaces: Integer): Single; overload;
+function RoundEx(const AInput: Double; APlaces: Integer): Double; overload;
+function RoundEx(const AInput: Currency; APlaces: integer): Currency; overload;
 {$IFDEF FPC}
 function GetSetName(const aSet:PTypeInfo; Value: Integer):string;
 function GetSetValue(const aSet:PTypeInfo; Name: String): Integer;
@@ -299,18 +308,37 @@ type
 
   { Event Support}
 
-  TNotifyEventEx = procedure (sender : TObject; const args: array of Pointer) of object;
-  TNotifyManyEvent = TArray<TNotifyEvent>;
-  TNotifyManyEventEx = TArray<TNotifyEventEx>;
+  TNotifyManyEvent = record
+    Handlers: TArray<TNotifyEvent>;
+    MainThreadHandlers : TArray<TNotifyEvent>;
+  end;
+
   TNotifyManyEventHelper = record helper for TNotifyManyEvent
-    procedure Add(listener : TNotifyEvent);
-    procedure Remove(listener : TNotifyEvent);
+    procedure Add(AHandler : TNotifyEvent; ExecuteMainThread : Boolean = False);
+    procedure Remove(AHandler : TNotifyEvent);
     procedure Invoke(sender : TObject);
   end;
-  TNotifyManyEventExHelper = record helper for TNotifyManyEventEx
-    procedure Add(listener : TNotifyEventEx);
-    procedure Remove(listener : TNotifyEventEx);
-    procedure Invoke(sender : TObject; const args: array of Pointer);
+
+  { TThreadNotify }
+
+  TThreadNotify = class
+  type
+    TPendingNotifyManyEvent = record
+      Sender : TObject;
+      Handlers : TArray<TNotifyEvent>;
+    end;
+  private
+    FTargetThread : TThread;
+    FLock : TCriticalSection;
+    FPendingNotifications : TList<TPendingNotifyManyEvent>;
+    procedure InvokePendingOnTargetThread;
+  public
+    constructor Create(ATargetThread : TThread);
+    destructor Destroy; override;
+    procedure Invoke(Sender: TObject; Handler : TNotifyEvent); overload;
+    procedure Invoke(Sender: TObject; const Handlers: TArray<TNotifyEvent>); overload;
+    class procedure InvokeMainThread(Sender: TObject; Handler : TNotifyEvent); overload;
+    class procedure InvokeMainThread(Sender: TObject; const Handlers: TArray<TNotifyEvent>); overload;
   end;
 
   { TArrayTool }
@@ -371,7 +399,7 @@ type
 
   TFileStreamHelper = class helper for TFileStream
     {$IFNDEF FPC}
-    procedure WriteAnsiString(const AString : String);
+    procedure WriteString(const AString : String);
     {$ENDIF}
   end;
 
@@ -381,15 +409,51 @@ type
     class procedure AppendText(const AFileName: string; const AText: string);
   end;
 
-  { TLogicalCPUCount }
+  { TCPUTool }
 
-  TLogicalCPUCount = class sealed(TObject)
-
-  public
+  TCPUTool = class
     //returns number of cores: a computer with two hyperthreaded cores will report 4
     class function GetLogicalCPUCount(): Int32; static;
-
   end;
+
+
+  { TStatistics }
+
+  { NOTE: this is a running stats keeper that does not keep item set, thus
+    uses estimations which can diverge from real values }
+  TStatistics = record
+  private
+    FCount : UInt32; // Number of items in the analysis
+    FTotal : Double; // Total of data
+    FTotal2 : Double; // Sum of sqaures of data
+//    FProduct : Double; // Product of data
+    FRecip : Double; // Sum of reciprocals of data
+    FMin : Double;  // Min datum
+    FMax : Double;  // Min datum
+  public
+    property SampleCount : UInt32 read FCount;
+    property Sum : Double read FTotal;
+    property SquaredSum : Double read FTotal2;
+//    property Product : Double read FProduct;
+    property ReciprocalSum : Double read FRecip;
+    property Minimum : Double read FMin;
+    property Maximum : Double read FMax;
+    procedure Reset;
+    function Mean : Double; inline;
+    function PopulationVariance : Double; inline;
+    function PopulationStandardDeviation : Double; inline;
+    function PopulationVariationCoefficient : Double; inline;
+ //   function GeometricMean : Double; inline;
+    function HarmonicMean : Double; inline;
+    function MinimumError : Double; inline;
+    function MaximumError : Double; inline;
+    function SampleVariance : Double; inline;
+    function SampleStandardDeviation : Double; inline;
+    function SampleVariationCoefficient : Double; inline;
+    procedure AddDatum(ADatum : Double); overload; inline;
+    procedure AddDatum(ADatum : Double; ANumTimes : UInt32); overload;
+    procedure RemoveDatum(ADatum : Double);
+end;
 
 resourcestring
   sNotImplemented = 'Not implemented';
@@ -401,7 +465,7 @@ resourcestring
 
 implementation
 
-uses dateutils, {$IFDEF FPC}StrUtils{$ELSE}System.AnsiStrings{$ENDIF};
+uses dateutils, StrUtils;
 
 const
   IntlDateTimeFormat : TFormatSettings = (
@@ -425,15 +489,16 @@ const
   {$ENDIF LINUX}
   {$ENDIF}
 
+
 var
   MinTimeStampDateTime : TDateTime = 0;
   VarTrue : Variant;
   VarFalse : Variant;
-
+  GMainThreadNotify : TThreadNotify;
 
 { Global helper functions }
 
-function String2Hex(const Buffer: AnsiString): AnsiString;
+function String2Hex(const Buffer: String): String;
 var
   n: Integer;
 begin
@@ -442,22 +507,22 @@ begin
     Result := AnsiLowerCase(Result + IntToHex(Ord(Buffer[n]), 2));
 end;
 
-function Hex2Bytes(const AHexString: AnsiString): TBytes;
+function Hex2Bytes(const AHexString: String): TBytes;
 begin
   if NOT TryHex2Bytes(AHexString, Result) then
     raise EArgumentOutOfRangeException.Create('Invalidly formatted hexadecimal string.');
 end;
 
-function TryHex2Bytes(const AHexString: AnsiString; out ABytes : TBytes): boolean; overload;
+function TryHex2Bytes(const AHexString: String; out ABytes : TBytes): boolean; overload;
 var
   P : PAnsiChar;
-  LHexString : AnsiString;
+  LHexString : String;
   LHexIndex, LHexLength, LHexStart : Integer;
 begin
   SetLength(ABytes, 0);
   LHexLength := System.Length(AHexString);
   LHexStart := 1;
-  if AnsiStartsText('0x', AHexString) then begin
+  if {$IFDEF FPC}AnsiStartsText{$ELSE}StartsText{$ENDIF}('0x', AHexString) then begin
 
     // Special case: 0x0 = empty byte array
     if (LHexLength = 3) AND (AHexString[3] = '0') then
@@ -475,14 +540,19 @@ begin
   SetLength(ABytes, LHexLength DIV 2);
   P := @ABytes[Low(ABytes)];
   LHexString := LowerCase(AHexString);
+  {$IFDEF FPC}
   LHexIndex := HexToBin(PAnsiChar(@LHexString[LHexStart]), P, System.Length(ABytes));
+  {$ELSE}
+  LHexIndex := HexToBin(@LHexString[LHexStart],0,ABytes,0,Length(ABytes));
+  {$ENDIF}
   Result := (LHexIndex = (LHexLength DIV 2));
 end;
 
-function Bytes2Hex(const ABytes: TBytes; AUsePrefix : boolean = false) : AnsiString;
+
+function Bytes2Hex(const ABytes: TBytes; AUsePrefix : boolean = false) : String;
 var
   i, LStart, LLen : Integer;
-  s : AnsiString;
+  s : String;
   b : Byte;
 begin
   LLen := System.Length(ABytes)*2;
@@ -558,15 +628,69 @@ begin
 end;
 
 function BytesEqual(const ABytes1, ABytes2 : TBytes) : boolean;
+begin
+  Result := BytesEqual(ABytes1, ABytes2, 0, Length(ABytes1));
+end;
+
+function BytesEqual(const ABytes1, ABytes2 : TBytes; AFrom, ALength : UInt32) : boolean;
 var ABytes1Len, ABytes2Len : Integer;
 begin
+  if ALength = 0 then
+    Exit(False);
   ABytes1Len := Length(ABytes1);
   ABytes2Len := Length(ABytes2);
-  if (ABytes1Len <> ABytes2Len) OR (ABytes1Len = 0) then
-    Result := False
-  else
-    Result := CompareMem(@ABytes1[0], @ABytes2[0], ABytes1Len);
+  if ((ABytes1Len - AFrom) < ALength) OR ((ABytes2Len - AFrom) < ALength ) then
+    Exit(False);
+  Result := CompareMem(@ABytes1[AFrom], @ABytes2[AFrom], ALength);
 end;
+
+function SetLastDWordLE(const ABytes: TBytes; AValue: UInt32): TBytes;
+var
+  ABytesLength : Integer;
+begin
+  // Clone the original header
+  Result := Copy(ABytes);
+
+  // If digest not big enough to contain a nonce, just return the clone
+  ABytesLength := Length(ABytes);
+  if ABytesLength < 4 then
+    exit;
+
+  // Overwrite the nonce in little-endian
+  Result[ABytesLength - 4] := Byte(AValue);
+  Result[ABytesLength - 3] := (AValue SHR 8) AND 255;
+  Result[ABytesLength - 2] := (AValue SHR 16) AND 255;
+  Result[ABytesLength - 1] := (AValue SHR 24) AND 255;
+end;
+
+function GetLastDWordLE(const ABytes: TBytes) : UInt32;
+var LLen : Integer;
+begin
+  LLen := Length(ABytes);
+  if LLen < 4 then
+   raise EArgumentException.Create('ABytes needs to be at least 4 bytes');
+
+  // Last 4 bytes are nonce (LE)
+  Result := ABytes[LLen - 4] OR
+           (ABytes[LLen - 3] SHL 8) OR
+           (ABytes[LLen - 2] SHL 16) OR
+           (ABytes[LLen - 1] SHL 24);
+end;
+
+function GetDWordLE(const ABytes: TBytes; AOffset : Integer) : UInt32;
+var LLen : Integer;
+begin
+  LLen := Length(ABytes);
+  if LLen < AOffset+3 then
+   raise EArgumentException.Create('ABytes[AOffset] needs at least 4 more bytes');
+
+  // Last 4 bytes are nonce (LE)
+  Result := ABytes[AOffset + 0] OR
+           (ABytes[AOffset + 1] SHL 8) OR
+           (ABytes[AOffset + 2] SHL 16) OR
+           (ABytes[AOffset + 3] SHL 24);
+end;
+
 
 function IIF(const ACondition: Boolean; const ATrueResult, AFalseResult: Cardinal): Cardinal;
 begin
@@ -663,6 +787,59 @@ begin
       Result := AArray[i];
   end;
 end;
+
+function RoundEx(const AInput: Single; APlaces: Integer): Single;
+var
+  k: Single;
+begin
+  if APlaces = 0 then begin
+    Result := Round(AInput);
+  end else begin
+    if APlaces > 0 then begin
+      k := Power(10, APlaces);
+      Result := Round(AInput * k) / k;
+    end else begin
+      k := Power(10, (APlaces*-1));
+      Result := Round(AInput / k) * k;
+    end;
+  end;
+end;
+
+function RoundEx(const AInput: Double; APlaces: Integer): Double;
+var
+  k: Double;
+begin
+  if APlaces = 0 then begin
+    Result := Round(AInput);
+  end else begin
+    if APlaces > 0 then begin
+      k := Power(10, APlaces);
+      Result := Round(AInput * k) / k;
+    end else begin
+      k := Power(10, (APlaces*-1));
+      Result := Round(AInput / k) * k;
+    end;
+  end;
+end;
+
+function RoundEx(const AInput: Currency; APlaces: integer): Currency;
+var
+  k: Currency;
+begin
+  if APlaces = 0 then begin
+    Result := Round(AInput);
+  end else begin
+    if APlaces > 0 then begin
+      k := Power(10, APlaces);
+      Result := Round(AInput * k) / k;
+    end else begin
+      k := Power(10, (APlaces*-1));
+      Result := Round(AInput / k) * k;
+    end;
+  end;
+end;
+
+
 
 {$IFDEF FPC}
 
@@ -1391,44 +1568,105 @@ end;
 
 { TNotifyManyEventHelper }
 
-procedure TNotifyManyEventHelper.Add(listener : TNotifyEvent);
+procedure TNotifyManyEventHelper.Add(AHandler : TNotifyEvent; ExecuteMainThread : Boolean = False);
 begin
-  if TArrayTool<TNotifyEvent>.IndexOf(self, listener) = -1 then begin
-    TArrayTool<TNotifyEvent>.Add(self, listener);
+  if NOT ExecuteMainThread then begin
+    if TArrayTool<TNotifyEvent>.IndexOf(self.Handlers, AHandler) = -1 then
+      TArrayTool<TNotifyEvent>.Add(self.Handlers, AHandler)
+  end else begin
+    if TArrayTool<TNotifyEvent>.IndexOf(self.MainThreadHandlers, AHandler) = -1 then
+      TArrayTool<TNotifyEvent>.Add(self.MainThreadHandlers, AHandler);
   end;
 end;
 
-procedure TNotifyManyEventHelper.Remove(listener : TNotifyEvent);
+procedure TNotifyManyEventHelper.Remove(AHandler : TNotifyEvent);
 begin
-  TArrayTool<TNotifyEvent>.Remove(self, listener);
+  TArrayTool<TNotifyEvent>.Remove(self.Handlers, AHandler);
+  TArrayTool<TNotifyEvent>.Remove(self.MainThreadHandlers, AHandler);
 end;
 
 procedure TNotifyManyEventHelper.Invoke(sender : TObject);
 var i : Integer;
 begin
-  for i := low(self) to high(self) do
-    self[i](sender);
+  for i := low(self.Handlers) to high(self.Handlers) do
+    self.Handlers[i](sender);
+
+  if Length(self.MainThreadHandlers) > 0 then
+    TThreadNotify.InvokeMainThread(sender, self.MainThreadHandlers);
 end;
 
-{ TNotifyManyEventHelperEx }
+{ TThreadNotify }
 
-procedure TNotifyManyEventExHelper.Add(listener : TNotifyEventEx);
+constructor TThreadNotify.Create(ATargetThread : TThread);
 begin
-  if TArrayTool<TNotifyEventEx>.IndexOf(self, listener) = -1 then begin
-    TArrayTool<TNotifyEventEx>.Add(self, listener);
+  FTargetThread := ATargetThread;
+  FLock := TCriticalSection.Create;
+  FPendingNotifications := TList<TPendingNotifyManyEvent>.Create;
+end;
+
+destructor TThreadNotify.Destroy;
+begin
+  FTargetThread := nil;
+  FLock.Acquire;
+  try
+    FPendingNotifications.Destroy;
+  finally
+    FLock.Release;
+    FLock.Destroy;
   end;
 end;
 
-procedure TNotifyManyEventExHelper.Remove(listener : TNotifyEventEx);
+procedure TThreadNotify.InvokePendingOnTargetThread;
+var
+  LPendings : TArray<TPendingNotifyManyEvent>;
+  LPending : TPendingNotifyManyEvent;
+  LNotify : TNotifyEvent;
 begin
-  TArrayTool<TNotifyEventEx>.Remove(self, listener);
+  if (NOT Assigned(FTargetThread)) OR (NOT Assigned(FLock)) OR (NOT Assigned(FPendingNotifications)) then
+    exit;
+
+  if TThread.CurrentThread.ThreadID = FTargetThread.ThreadID then begin
+    FLock.Acquire;
+    try
+      LPendings := FPendingNotifications.ToArray;
+      FPendingNotifications.Clear;
+    finally
+      FLock.Release;
+    end;
+    for LPending in LPendings do
+      for LNotify in LPending.Handlers do
+        LNotify(LPending.Sender);
+  end else TThread.Queue(FTargetThread, InvokePendingOnTargetThread);
 end;
 
-procedure TNotifyManyEventExHelper.Invoke(sender : TObject; const args: array of Pointer);
-var i : Integer;
+procedure TThreadNotify.Invoke(Sender: TObject; Handler : TNotifyEvent);
 begin
-  for i := Low(Self) to high(Self) do
-    self[i](sender, args);
+  Invoke(Sender, TArrayTool<TNotifyEvent>.Create(Handler));
+end;
+
+procedure TThreadNotify.Invoke(Sender: TObject; const Handlers: TArray<TNotifyEvent>);
+var
+  LPending : TPendingNotifyManyEvent;
+begin
+  FLock.Acquire;
+  try
+    LPending.Sender := Sender;
+    LPending.Handlers := Handlers;
+    FPendingNotifications.Add(LPending);
+  finally
+    FLock.Release;
+  end;
+  InvokePendingOnTargetThread;
+end;
+
+class procedure TThreadNotify.InvokeMainThread(Sender: TObject; Handler : TNotifyEvent);
+begin
+  InvokeMainThread(Sender, TArrayTool<TNotifyEvent>.Create(Handler));
+end;
+
+class procedure TThreadNotify.InvokeMainThread(Sender: TObject; const Handlers: TArray<TNotifyEvent>);
+begin
+  GMainThreadNotify.Invoke(Sender, Handlers);
 end;
 
 { TArrayTool }
@@ -1830,7 +2068,7 @@ end;
 
 { TFileStreamHelper }
 {$IFNDEF FPC}
-procedure TFileStreamHelper.WriteAnsiString(const AString : String);
+procedure TFileStreamHelper.WriteString(const AString : String);
 begin
    Self.WriteBuffer(Pointer(AString)^, Length(AString));
 end;
@@ -1850,15 +2088,15 @@ begin
     fstream.Seek(0, soFromEnd);
   end;
   try
-    fstream.WriteAnsiString(AText+#13#10);
+    fstream.{$IFDEF FPC}WriteAnsiString{$ELSE}WriteString{$ENDIF}(AText+#13#10);
   finally
     fstream.Free;
   end;
 end;
 
-{ TLogicalCPUCount }
+{ TCPUTool }
 
-class function TLogicalCPUCount.GetLogicalCPUCount(): Int32;
+class function TCPUTool.GetLogicalCPUCount(): Int32;
 {$IFDEF FPC}
 {$IFDEF WINDOWS}
 var
@@ -1921,11 +2159,176 @@ begin
 {$ENDIF FPC}
 end;
 
+{ TStatistics }
+
+function TStatistics.Mean : Double;
+begin
+  Result := NaN;
+  if SampleCount > 0 then
+    Result := Sum / SampleCount;
+end;
+
+function TStatistics.PopulationStandardDeviation : Double;
+begin
+  Result := Sqrt(PopulationVariance);
+end;
+
+function TStatistics.PopulationVariance : Double;
+var LSum : Double;
+begin
+  LSum := Sum;
+  if SampleCount > 2 then
+    Result := ((SampleCount * SquaredSum) - (LSum * LSum)) / (SampleCount * SampleCount)
+  else
+    Result := Nan;
+end;
+
+function TStatistics.PopulationVariationCoefficient : Double;
+begin
+  if SampleCount > 0 then
+    Result :=  (PopulationVariance / Mean) * 100.0
+  else
+    Result := Nan;
+end;
+
+(*function TStatistics.GeometricMean : Double;
+begin
+  if SampleCount > 0 then
+    Result :=  Power(Product, 1.0 / SampleCount)
+  else
+    Result := Nan;
+end;*)
+
+function TStatistics.HarmonicMean : Double;
+begin
+  if SampleCount > 0 then
+    Result := SampleCount / ReciprocalSum
+  else
+    Result := Nan;
+end;
+
+function TStatistics.MinimumError : Double;
+begin
+  if (Mean * Mean) > (EPSILON * EPSILON) then
+    Result := 100.0 * (Minimum - Mean) / Mean
+  else
+    Result := Nan;
+end;
+
+function TStatistics.MaximumError : Double;
+begin
+  if (Mean * Mean) > (EPSILON * EPSILON) then
+    Result := 100.0 * (Maximum - Mean) / Mean
+  else
+    Result := Nan;
+end;
+
+function TStatistics.SampleStandardDeviation : Double;
+begin
+  if SampleCount >= 2 then
+    Result := Sqrt(SampleVariance)
+  else
+    Result := Nan;
+end;
+
+function TStatistics.SampleVariance : Double;
+var LSum : Double;
+begin
+  LSum := Sum;
+  if SampleCount > 2 then
+    Result := ((SampleCount * SquaredSum) - (LSum * LSum)) / ((SampleCount - 1) * (SampleCount - 1))
+  else
+    Result := Nan;
+end;
+
+function TStatistics.SampleVariationCoefficient : Double;
+begin
+  if SampleCount >= 2 then
+    Result := 100 * (SampleStandardDeviation / Mean)
+  else
+    Result := Nan;
+end;
+
+procedure TStatistics.Reset;
+begin
+  FCount := 0;
+  FMin := 0.0;
+  FMax := 0.0;
+  FTotal := 0.0;
+  FTotal2 := 0.0;
+  FRecip := 0.0;
+  //FProduct := 1.0;
+end;
+
+procedure TStatistics.AddDatum(ADatum : Double);
+begin
+  if FCount = 0 then
+    Reset;
+  Inc(FCount);
+  FTotal := FTotal + ADatum;
+  FTotal2 := FTotal2 + ADatum * ADatum;
+  if IsNaN(FRecip) OR ((ADatum * ADatum) < (EPSILON * EPSILON)) then
+    FRecip := double.NaN
+  else
+    FRecip := FRecip + (1.0 / ADatum);
+  //FProduct := FProduct * ADatum;
+  if (FCount = 1) then begin
+    // first data so set _min/_max
+    FMin := ADatum;
+    FMax := ADatum;
+  end else begin
+    // adjust _min/_max boundaries if necessary
+    if (ADatum < FMin) then
+      FMin := ADatum;
+    if (ADatum > FMax) then
+      FMax := ADatum;
+  end;
+end;
+
+procedure TStatistics.AddDatum(ADatum : Double; ANumTimes : UInt32);
+begin
+  if FCount = 0 then
+    Reset;
+  FCount := FCount + ANumTimes;
+  FTotal := FTotal + ADatum * ANumTimes;
+  FTotal2 := FTotal2 + ADatum * ADatum * ANumTimes;
+  if IsNaN(FRecip) OR ((ADatum * ADatum) < (EPSILON * EPSILON)) then
+    FRecip := NaN
+  else
+    FRecip := FRecip + (1.0 / ADatum) * ANumTimes;
+  //FProduct := FProduct * Power(ADatum, ANumTimes);
+  if (FCount = 1) then begin
+    // first data so set _min/_max
+    FMin := ADatum;
+    FMax := ADatum;
+  end else begin
+    // adjust _min/_max boundaries if necessary
+    if ADatum < FMin then
+        FMin := ADatum;
+    if ADatum > FMax then
+        FMax := ADatum;
+  end;
+end;
+
+procedure TStatistics.RemoveDatum(ADatum : Double);
+begin
+  if FCount = 0 then
+    Exit;
+  Dec(FCount);
+  FTotal := FTotal - ADatum;
+  FTotal2 := FTotal2 - ADatum * ADatum;
+  FRecip := FRecip - (1.0 / ADatum);
+  if ABS(ADatum) > EPSILON then
+   //FProduct := FProduct / ADatum;
+end;
+
 initialization
   MinTimeStampDateTime:= StrToDateTime('1980-01-01 00:00:000', IntlDateTimeFormat);
   VarTrue := True;
   VarFalse := False;
+  GMainThreadNotify := TThreadNotify.Create ( TThread.CurrentThread ); // unit initialization runs in main thread
 
 finalization
+  FreeAndNil(GMainThreadNotify);
 
 end.

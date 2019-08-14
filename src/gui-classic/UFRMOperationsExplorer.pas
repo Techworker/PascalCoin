@@ -23,13 +23,14 @@ interface
 
 uses
   {$IFnDEF FPC}
-    Windows, AppEvnts,
+    Windows, AppEvnts, System.Actions,
   {$ELSE}
     LCLIntf, LCLType, LMessages, FileUtil,
   {$ENDIF}
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls, ExtCtrls,
   Menus, ActnList, UAccounts, UBlockChain, UNode, UCrypto, UBaseTypes,
-  UFileStorage, UWallet, UConst, UTxMultiOperation, UOpTransaction, URPC, UJSONFunctions;
+  UFileStorage, UWallet, UConst, UTxMultiOperation, UOpTransaction, URPC,
+  {$IFNDEF FPC}System.Generics.Collections{$ELSE}Generics.Collections{$ENDIF}, UJSONFunctions;
 
 
 type
@@ -169,7 +170,7 @@ begin
     if (op is TOpMultiOperation) then mop := TOpMultiOperation(op);
   end;
   If Not Assigned(mop) then begin
-    mop := TOpMultiOperation.Create;
+    mop := TOpMultiOperation.Create(FSourceNode.Bank.SafeBox.CurrentProtocol);
     FOperationsHashTree.AddOperationToHashTree(mop);
     mop.Free;
     mop := FOperationsHashTree.GetOperation(FOperationsHashTree.OperationsCount-1) as TOpMultiOperation;
@@ -278,7 +279,7 @@ begin
   If Not InputQuery(Caption,Format('Multioperation: Remove account sender/receiver/changer. Which account?',[]),aux) then Exit;
   nAccount := StrToIntDef(aux,-1);
   If nAccount<0 then Exit;
-  newMop := TOpMultiOperation.Create;
+  newMop := TOpMultiOperation.Create(FSourceNode.Bank.SafeBox.CurrentProtocol);
   Try
     SetLength(txs,0);
     SetLength(txr,0);
@@ -357,7 +358,7 @@ Var op : TPCOperation;
   aux : String;
   nAccount,n_operation : Cardinal;
   changes : TMultiOpChangesInfo;
-  new_name,errors : AnsiString;
+  new_name, errors : String;
   new_type : Word;
   new_account_key : TAccountKey;
 label LBL_start_changer;
@@ -368,7 +369,7 @@ begin
     if (op is TOpMultiOperation) then mop := TOpMultiOperation(op);
   end;
   If Not Assigned(mop) then begin
-    mop := TOpMultiOperation.Create;
+    mop := TOpMultiOperation.Create(FSourceNode.Bank.SafeBox.CurrentProtocol);
     FOperationsHashTree.AddOperationToHashTree(mop);
     mop.Free;
     mop := FOperationsHashTree.GetOperation(FOperationsHashTree.OperationsCount-1) as TOpMultiOperation;
@@ -391,7 +392,7 @@ LBL_start_changer:
     If Assigned(FSourceNode) then begin
       If (nAccount<FSourceNode.Bank.AccountsCount) then begin
         n_operation := FSourceNode.Bank.SafeBox.Account(nAccount).n_operation+1;
-        new_name:= FSourceNode.Bank.SafeBox.Account(nAccount).name;
+        new_name:= TEncoding.ANSI.GetString( FSourceNode.Bank.SafeBox.Account(nAccount).name );
         new_type:= FSourceNode.Bank.SafeBox.Account(nAccount).account_type;
         new_account_key := FSourceNode.Bank.SafeBox.Account(nAccount).accountInfo.accountKey;
       end;
@@ -408,7 +409,7 @@ LBL_start_changer:
       aux := new_name;
       If Not InputQuery(Caption,Format('New name for account %s:',[TAccountComp.AccountNumberToAccountTxtNumber(nAccount)]),aux) then Break;
       aux := LowerCase(aux);
-    Until (aux='') Or (TPCSafeBox.ValidAccountName(aux,errors));
+    Until (aux='') Or (TPCSafeBox.ValidAccountName(TEncoding.ANSI.GetBytes(aux),errors));
     new_name := aux;
 
     aux := IntToStr(new_type);
@@ -428,7 +429,7 @@ LBL_start_changer:
     changes[high(changes)] := CT_TMultiOpChangeInfo_NUL;
     changes[high(changes)].Account:=nAccount;
     changes[high(changes)].Changes_type:=[account_name,account_type];
-    changes[high(changes)].New_Name:=new_name;
+    changes[high(changes)].New_Name:=TEncoding.ANSI.GetBytes(new_name);
     changes[high(changes)].New_Type:=new_type;
     If new_account_key.EC_OpenSSL_NID<>CT_TECDSA_Public_Nul.EC_OpenSSL_NID then begin
       changes[high(changes)].Changes_type:=changes[high(changes)].Changes_type + [public_key];
@@ -494,7 +495,7 @@ end;
 
 procedure TFRMOperationsExplorer.ActExecuteOperationExecute(Sender: TObject);
 Var op : TPCOperation;
-  errors : AnsiString;
+  errors : String;
 begin
   If Not Assigned(FSourceNode) then Raise Exception.Create('No node to Execute');
   op := GetSelectedOperation;
@@ -531,7 +532,7 @@ Var i : Integer;
   raw : TRawBytes;
   aux : AnsiString;
   auxS : String;
-  errors : AnsiString;
+  errors : String;
   opht : TOperationsHashTree;
   ms : TMemoryStream;
 begin
@@ -603,11 +604,17 @@ begin
 end;
 
 procedure TFRMOperationsExplorer.SetSourceNode(AValue: TNode);
+var LLockedMempool : TPCOperationsComp;
 begin
   if FSourceNode=AValue then Exit;
   FSourceNode:=AValue;
   If Assigned(FSourceNode) then begin
-    FOperationsHashTree.CopyFromHashTree(FSourceNode.Operations.OperationsHashTree);
+    LLockedMempool := FSourceNode.LockMempoolRead;
+    try
+      FOperationsHashTree.CopyFromHashTree(LLockedMempool.OperationsHashTree);
+    finally
+      FSourceNode.UnlockMempoolRead;
+    end;
   end else FOperationsHashTree.ClearHastThree;
 end;
 
@@ -660,7 +667,7 @@ procedure TFRMOperationsExplorer.UpdateSelectedOperationInfo;
 Var op : TPCOperation;
   opht : TOperationsHashTree;
   i : Integer;
-  l : TList;
+  l : TList<Cardinal>;
   aux : String;
   raw : TRawBytes;
   ms : TMemoryStream;
@@ -678,7 +685,7 @@ begin
     mOperationInfo.Lines.Add(Format('%s',[op.ToString]));
     mOperationInfo.Lines.Add('');
     mOperationInfo.Lines.Add(Format('OpType:%d ClassName:%s',[op.OpType,op.ClassName]));
-    l := TList.Create;
+    l := TList<Cardinal>.Create;
     Try
       op.AffectedAccounts(l); aux := '';
       For i:=0 to l.Count-1 do begin

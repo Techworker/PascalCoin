@@ -1,25 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CONFIG>
   <ProjectOptions>
-    <Version Value="10"/>
+    <Version Value="12"/>
     <PathDelim Value="\"/>
     <General>
+      <Flags>
+        <CompatibilityMode Value="True"/>
+      </Flags>
       <SessionStorage Value="InProjectDir"/>
-      <MainUnit Value="0"/>
       <Title Value="PascalCoinUnitTests"/>
       <ResourceType Value="res"/>
       <UseXPManifest Value="True"/>
     </General>
     <BuildModes Count="1">
-      <Item1 Name="Default" Default="True"/>
+      <Item1 Name="Debug" Default="True"/>
     </BuildModes>
     <PublishOptions>
       <Version Value="2"/>
     </PublishOptions>
     <RunParams>
-      <local>
-        <FormatVersion Value="1"/>
-      </local>
+      <FormatVersion Value="2"/>
+      <Modes Count="1">
+        <Mode0 Name="default"/>
+      </Modes>
     </RunParams>
     <RequiredPackages Count="3">
       <Item1>
@@ -32,7 +35,7 @@
         <PackageName Value="FCL"/>
       </Item3>
     </RequiredPackages>
-    <Units Count="16">
+    <Units Count="19">
       <Unit0>
         <Filename Value="PascalCoinUnitTests.lpr"/>
         <IsPartOfProject Value="True"/>
@@ -81,25 +84,37 @@
         <IsPartOfProject Value="True"/>
       </Unit10>
       <Unit11>
-        <Filename Value="URandomHashTests.pas"/>
+        <Filename Value="..\libraries\sphere10\UCommon.Collections.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit11>
       <Unit12>
-        <Filename Value="..\libraries\sphere10\UCommon.Collections.pas"/>
+        <Filename Value="UCommon.Collections.Tests.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit12>
       <Unit13>
-        <Filename Value="UCommon.Collections.Tests.pas"/>
+        <Filename Value="UCommon.Tests.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit13>
       <Unit14>
-        <Filename Value="UCommon.Tests.pas"/>
+        <Filename Value="UMemory.Tests.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit14>
       <Unit15>
-        <Filename Value="UMemory.Tests.pas"/>
+        <Filename Value="UThread.Tests.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit15>
+      <Unit16>
+        <Filename Value="URandomHash.Tests.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit16>
+      <Unit17>
+        <Filename Value="URandomHash2.Tests.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit17>
+      <Unit18>
+        <Filename Value="..\core\URandomHash2.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit18>
     </Units>
   </ProjectOptions>
   <CompilerOptions>
@@ -109,17 +124,34 @@
       <Filename Value=".\bin\PascalCoinUnitTests"/>
     </Target>
     <SearchPaths>
-      <IncludeFiles Value="$(ProjOutDir)"/>
-      <OtherUnitFiles Value="..\core;..\libraries\generics.collections;..\libraries\hashlib4pascal;..\libraries\sphere10;..\libraries\pascalcoin"/>
+      <IncludeFiles Value="$(ProjOutDir);..\..\src"/>
+      <OtherUnitFiles Value="..\..\src;..\core;..\libraries\generics.collections;..\libraries\hashlib4pascal;..\libraries\sphere10;..\libraries\pascalcoin"/>
       <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
     </SearchPaths>
+    <Parsing>
+      <SyntaxOptions>
+        <IncludeAssertionCode Value="True"/>
+      </SyntaxOptions>
+    </Parsing>
     <CodeGeneration>
-      <Optimizations>
-        <OptimizationLevel Value="4"/>
-      </Optimizations>
+      <Checks>
+        <IOChecks Value="True"/>
+        <RangeChecks Value="True"/>
+        <OverflowChecks Value="True"/>
+        <StackChecks Value="True"/>
+      </Checks>
+      <VerifyObjMethodCallValidity Value="True"/>
     </CodeGeneration>
     <Linking>
+      <Debugging>
+        <DebugInfoType Value="dsDwarf2Set"/>
+        <UseHeaptrc Value="True"/>
+        <TrashVariables Value="True"/>
+        <UseExternalDbgSyms Value="True"/>
+      </Debugging>
       <Options>
+        <PassLinkerOptions Value="True"/>
+        <LinkerOptions Value=" -dUseCThreads"/>
         <Win32>
           <GraphicApplication Value="True"/>
         </Win32>

@@ -33,7 +33,9 @@ unit UNetProtection;
 
 interface
 
-Uses SysUtils, Classes, UJSONFunctions, UThread, ULog, UTime;
+Uses SysUtils, Classes, UJSONFunctions, UThread, ULog, UTime, UBaseTypes,
+  {$IFNDEF FPC}System.Generics.Collections{$ELSE}Generics.Collections{$ENDIF};
+
 
 Type
   TIpInfo = Record
@@ -51,11 +53,12 @@ Type
 
   TIpInfos = Class
   private
-    FThreadList : TPCThreadList;
+    FThreadList : TPCThreadList<Pointer>;
     FMaxStatsLifetime: Integer;
     FMaxStatsCount: Integer;
     FDeletedStatsCount: Int64;
-    function Find(lockedList : TList; const ip : String; var Index: Integer): Boolean;
+    FLastCleanedTC : TTickCount;
+    function Find(lockedList : TList<Pointer>; const ip : String; var Index: Integer): Boolean;
     procedure SetMaxStatsLifetime(const Value: Integer);
     procedure CleanLastStatsByUpdatedTimestamp(minTimestamp : Integer);
     procedure SetMaxStatsCount(const Value: Integer);
@@ -73,6 +76,7 @@ Type
     function Count : Integer;
     property MaxStatsLifetime : Integer read FMaxStatsLifetime write SetMaxStatsLifetime;
     property MaxStatsCount : Integer read FMaxStatsCount write SetMaxStatsCount;
+    function CleanLastStats : Integer;
   End;
 
 implementation
@@ -81,11 +85,24 @@ implementation
 
 Type PIpInfo = ^TIpInfo;
 
+function TIpInfos.CleanLastStats : Integer;
+var LLastCleanedCount : Integer;
+  LCurrTimestamp : Integer;
+begin
+  LCurrTimestamp := UnivDateTimeToUnix( DateTime2UnivDateTime(now) );
+  LLastCleanedCount := FDeletedStatsCount;
+  CleanLastStatsByUpdatedTimestamp(LCurrTimestamp - FMaxStatsLifetime);
+  Result := FDeletedStatsCount-LLastCleanedCount;
+  if (LLastCleanedCount<>FDeletedStatsCount) then begin
+    TLog.NewLog(ltInfo,ClassName,Format('Cleaned %d old stats',[(FDeletedStatsCount-LLastCleanedCount)]));
+  end;
+end;
+
 procedure TIpInfos.CleanLastStatsByUpdatedTimestamp(minTimestamp: Integer);
 var jsonOpType, relJsonOpType, relJsonNetTransferType : TPCJSONObject;
   lasts : TPCJSONArray;
   iIp, i,j,k : Integer;
-  list : TList;
+  list : TList<Pointer>;
   p : PIpInfo;
 begin
   list := FThreadList.LockList;
@@ -116,6 +133,7 @@ begin
         end;
       end;
     end;
+    FLastCleanedTC := TPlatform.GetTickCount;
   Finally
     FThreadList.UnlockList;
   End;
@@ -124,7 +142,7 @@ end;
 procedure TIpInfos.Clear;
 var p : PIpInfo;
   i : Integer;
-  list : TList;
+  list : TList<Pointer>;
 begin
   list := FThreadList.LockList;
   Try
@@ -135,6 +153,7 @@ begin
     end;
     FDeletedStatsCount := 0;
     list.Clear;
+    FLastCleanedTC := TPlatform.GetTickCount;
   Finally
     FThreadList.UnlockList;
   End;
@@ -148,10 +167,11 @@ end;
 
 constructor TIpInfos.Create;
 begin
-  FThreadList := TPCThreadList.Create(Self.ClassName);
+  FThreadList := TPCThreadList<Pointer>.Create(Self.ClassName);
   FMaxStatsLifetime := 60*60*24; // Last values by 24 hours by default
   FMaxStatsCount := 1000; // Max 1000 last stats by default
   FDeletedStatsCount := 0;
+  FLastCleanedTC := TPlatform.GetTickCount;
 end;
 
 destructor TIpInfos.Destroy;
@@ -161,7 +181,7 @@ begin
   inherited;
 end;
 
-function TIpInfos.Find(lockedList : TList; const ip: String; var Index: Integer): Boolean;
+function TIpInfos.Find(lockedList : TList<Pointer>; const ip: String; var Index: Integer): Boolean;
 var L, H, I, C: Integer;
   PN : PIpInfo;
 begin
@@ -172,7 +192,7 @@ begin
   begin
     I := (L + H) shr 1;
     PN := lockedList.Items[I];
-    C := CompareStr( PN.ip, ip );
+    C := CompareStr( PN^.ip, ip );
     if C < 0 then L := I + 1 else
     begin
       H := I - 1;
@@ -187,7 +207,7 @@ begin
 end;
 
 function TIpInfos.Lock(index: Integer): TIpInfo;
-var list : TList;
+var list : TList<Pointer>;
 begin
   list := FThreadList.LockList;
   if (list.Count>index) then begin
@@ -229,7 +249,7 @@ begin
 end;
 
 function TIpInfos.Lock(const AIp: String; MarkAsUpdated: Boolean): TPCJSONObject;
-var list : TList;
+var list : TList<Pointer>;
   i : Integer;
   p : PIpInfo;
 begin
@@ -353,6 +373,9 @@ begin
           lasts.Delete(0);
         end;
       end;
+    end;
+    if TPlatform.GetElapsedMilliseconds( FLastCleanedTC ) > (FMaxStatsLifetime * 1000) then begin ///  Clean stats auto
+      CleanLastStats;
     end;
   Finally
     Unlock;

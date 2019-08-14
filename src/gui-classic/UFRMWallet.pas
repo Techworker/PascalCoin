@@ -34,8 +34,9 @@ uses
   ExtCtrls, ComCtrls, UWallet, StdCtrls, ULog, Grids, UAppParams, UBlockChain,
   UNode, UGridUtils, UJSONFunctions, UAccounts, Menus, ImgList, UNetProtocol,
   UCrypto, Buttons, UPoolMining, URPC, UFRMAccountSelect, UConst,
-  UAccountKeyStorage, UBaseTypes,
-  UFRMRPCCalls, UTxMultiOperation;
+  UAccountKeyStorage, UBaseTypes, UPCDataTypes,
+  UFRMRPCCalls, UTxMultiOperation,
+  {$IFNDEF FPC}System.Generics.Collections{$ELSE}Generics.Collections{$ENDIF};
 
 Const
   CM_PC_WalletKeysChanged = WM_USER + 1;
@@ -227,21 +228,31 @@ type
     procedure MiFindOperationbyOpHashClick(Sender: TObject);
     procedure MiAccountInformationClick(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
+    procedure Test_ShowDiagnosticTool(Sender: TObject);
   private
     FLastNodesCacheUpdatedTS : TDateTime;
     FBackgroundPanel : TPanel;
     FBackgroundLabel : TLabel;
     FMinersBlocksFound: Integer;
+    {$IFDEF TESTNET}
+    FLastAskForAccountTC : TTickCount;
+    {$ENDIF}
     procedure SetMinersBlocksFound(const Value: Integer);
     Procedure CheckIsReady;
     Procedure FinishedLoadingApp;
     Procedure FillAccountInformation(Const Strings : TStrings; Const AccountNumber : Cardinal);
     Procedure FillOperationInformation(Const Strings : TStrings; Const OperationResume : TOperationResume);
-    {$IFDEF TESTING_NO_POW_CHECK}
+    Procedure InitMacOSMenu;
+    {$IFDEF TESTNET}
     Procedure InitMenuForTesting;
+    Procedure Test_RandomOperations(Sender: TObject);
+    Procedure Test_AskForFreeAccount(Sender: TObject);
+    {$IFDEF TESTING_NO_POW_CHECK}
     Procedure Test_CreateABlock(Sender: TObject);
-    Procedure Test_ShowPublicKeys(Sender: TObject);
     {$ENDIF}
+    {$ENDIF}
+    Procedure Test_ShowPublicKeys(Sender: TObject);
+    procedure OnAccountsGridUpdatedData(Sender : TObject);
   protected
     { Private declarations }
     FNode : TNode;
@@ -254,7 +265,6 @@ type
     FSelectedAccountsGrid : TAccountsGrid;
     FOperationsAccountGrid : TOperationsGrid;
     FPendingOperationsGrid : TOperationsGrid;
-    FOrderedAccountsKeyList : TOrderedAccountKeysList;
     FOperationsExplorerGrid : TOperationsGrid;
     FBlockChainGrid : TBlockChainGrid;
     FMinerPrivateKeyType : TMinerPrivateKey;
@@ -267,15 +277,16 @@ type
     FMustProcessWalletChanged : Boolean;
     FMustProcessNetConnectionUpdated : Boolean;
     FThreadActivate : TObject;
+    FLastAccountsGridInvalidateTC : TTickCount;
     Procedure OnNewAccount(Sender : TObject);
     Procedure OnReceivedHelloMessage(Sender : TObject);
     Procedure OnNetStatisticsChanged(Sender : TObject);
-    procedure OnNewLog(logtype : TLogType; Time : TDateTime; ThreadID : TThreadID; Const sender, logtext : AnsiString);
+    procedure OnNewLog(logtype : TLogType; Time : TDateTime; ThreadID : TThreadID; Const sender, logtext : String);
     procedure OnWalletChanged(Sender : TObject);
     procedure OnNetConnectionsUpdated(Sender : TObject);
     procedure OnNetNodeServersUpdated(Sender : TObject);
     procedure OnNetBlackListUpdated(Sender : TObject);
-    Procedure OnNodeMessageEvent(NetConnection : TNetConnection; MessageData : TRawBytes);
+    Procedure OnNodeMessageEvent(NetConnection : TNetConnection; MessageData : String);
     Procedure OnNodeKeysActivity(Sender : TObject);
     Procedure OnSelectedAccountsGridUpdated(Sender : TObject);
     Procedure OnMiningServerNewBlockFound(Sender : TObject);
@@ -313,11 +324,19 @@ implementation
   {$R *.lfm}
 {$ENDIF}
 
-Uses UFolderHelper, UOpenSSL, UOpenSSLdef, UTime, UFileStorage,
-  UThread, UOpTransaction, UECIES, UFRMPascalCoinWalletConfig,
-  UFRMOperationsExplorer,
+Uses UFolderHelper,
+{$IFDEF Use_OpenSSL}
+  UOpenSSL,
+{$ENDIF}
+  UTime, UFileStorage,
+  UThread, UOpTransaction, UFRMPascalCoinWalletConfig,
+  UFRMOperationsExplorer, UFRMDiagnosticTool,
+  {$IFDEF TESTNET}
+  UFRMRandomOperations,
+  UPCTNetDataExtraMessages,
+  {$ENDIF}
   UFRMAbout, UFRMOperation, UFRMWalletKeys, UFRMPayloadDecoder, UFRMNodesIp, UFRMMemoText,
-  USettings, UCommon;
+  USettings, UCommon, UPCOrderedLists;
 
 Type
 
@@ -327,7 +346,7 @@ Type
   private
     FLastTC : TTickCount;
     FLastMsg : String;
-    procedure OnProgressNotify(sender : TObject; const mesage : AnsiString; curPos, totalCount : Int64);
+    procedure OnProgressNotify(sender : TObject; const mesage : String; curPos, totalCount : Int64);
     procedure ThreadSafeNotify;
   protected
     procedure BCExecute; override;
@@ -335,12 +354,12 @@ Type
 
 { TThreadActivate }
 
-procedure TThreadActivate.OnProgressNotify(sender: TObject; const mesage: AnsiString; curPos, totalCount: Int64);
+procedure TThreadActivate.OnProgressNotify(sender: TObject; const mesage: String; curPos, totalCount: Int64);
 var pct : String;
 begin
   If TPlatform.GetElapsedMilliseconds(FLastTC)>500 then begin
     FLastTC := TPlatform.GetTickCount;
-    if (totalCount>0) then pct := Format('%.1f',[curPos*100/totalCount])+'%'
+    if (totalCount>0) then pct := Format('%.2f',[curPos*100/totalCount])+'%'
     else pct := '';
     FLastMsg:='Please wait until finished: '+mesage+' '+pct;
     Synchronize(ThreadSafeNotify);
@@ -357,20 +376,32 @@ begin
 end;
 
 procedure TThreadActivate.BCExecute;
-Var currentProcess : AnsiString;
+Var currentProcess : String;
+  LTC : TTickCount;
+  LRaw : TRawBytes;
 begin
   FLastTC := 0;
   FLastMsg := '';
+  //
+  OnProgressNotify(Self,'Reading Hardcoded RandomHash file',0,0);
+  LRaw := TCrypto.HexaToRaw(CT_Hardcoded_RandomHash_Table_HASH);
+  TPascalCoinProtocol.AllowUseHardcodedRandomHashTable(
+    ExtractFileDir(Application.ExeName)+PathDelim+CT_Hardcoded_RandomHash_Table_Filename,
+    LRaw );
   // Read Operations saved from disk
   TNode.Node.InitSafeboxAndOperations($FFFFFFFF,OnProgressNotify); // New Build 2.1.4 to load pending operations buffer
   TNode.Node.AutoDiscoverNodes(CT_Discover_IPs);
   TNode.Node.NetServer.Active := true;
   FLastTC := 0;
   FLastMsg := '';
+  LTC := TPlatform.GetTickCount;
   if (TNode.Node.Bank.BlocksCount<=1) then begin
     while (Not Terminated) And (Not TNode.Node.IsReady(currentProcess) Or (TNode.Node.Bank.BlocksCount<=1)) do begin
       Synchronize(ThreadSafeNotify);
       Sleep(200);
+      {$IFDEF TESTNET}
+      if (TPlatform.GetElapsedMilliseconds(LTC)>5000) then Break;
+      {$ENDIF}
     end;
   end;
   if Not Terminated then begin
@@ -391,8 +422,6 @@ begin
   if FIsActivated then exit;
   FIsActivated := true;
   try
-    // Check OpenSSL dll
-    if Not LoadSSLCrypt then raise Exception.Create('Cannot load '+SSL_C_LIB+#10+'To use this software make sure this file is available on you system or reinstall the application');
     TCrypto.InitCrypto;
     // Read Wallet
     Try
@@ -436,6 +465,9 @@ begin
     TThreadActivate(FThreadActivate).Suspended := False;
     UpdateConfigChanged;
     UpdateNodeStatus;
+    {$IFDEF TESTNET}
+    TPCTNetDataExtraMessages.InitNetDataExtraMessages(FNode,TNetData.NetData,FWalletKeys);
+    {$ENDIF}
   Except
     On E:Exception do begin
       E.Message := 'An error occurred during initialization. Application cannot continue:'+#10+#10+E.Message+#10+#10+'Application will close...';
@@ -494,7 +526,7 @@ end;
 
 procedure TFRMWallet.bbSendAMessageClick(Sender: TObject);
 Var basem,m : String;
-  them, errors : AnsiString;
+  them, errors : String;
   i,n : Integer;
   nc : TNetConnection;
 begin
@@ -506,7 +538,7 @@ begin
   basem := memoMessageToSend.Lines.Text;
   m := '';
   // Clear non valid characters:
-  for i := 1 to length(basem) do begin
+  for i := Low(basem) to High(basem) do begin
     if basem[i] in [#32..#127] then m := m + basem[i]
     else m:=m+'.';
   end;
@@ -559,7 +591,7 @@ begin
 end;
 
 procedure TFRMWallet.CheckIsReady;
-Var isready : AnsiString;
+Var isready : String;
 begin
   if Not Assigned(FNode) then Abort;
 
@@ -572,10 +604,13 @@ procedure TFRMWallet.CM_NetConnectionUpdated(var Msg: TMessage);
 Const CT_BooleanToString : Array[Boolean] of String = ('False','True');
 Var i : integer;
  NC : TNetConnection;
- l : TList;
+ l : TList<TNetConnection>;
  sClientApp, sLastConnTime : String;
  strings, sNSC, sRS, sDisc : TStrings;
  hh,nn,ss,ms : Word;
+ {$IFDEF TESTNET}
+ LFoundAccounts : Integer;
+ {$ENDIF}
 begin
   Try
     if Not TNetData.NetData.NetConnections.TryLockList(100,l) then exit;
@@ -648,6 +683,25 @@ begin
   Finally
     FMustProcessNetConnectionUpdated := false;
   End;
+  {$IFDEF TESTNET}
+  // TESTNET ONLY: Will automatic ask for get an account to other nodes if I have not enough
+  if TPlatform.GetElapsedMilliseconds(FLastAskForAccountTC)<60000 then Exit; // 1 per minute
+  FLastAskForAccountTC := TPlatform.GetTickCount;
+  LFoundAccounts := 0;
+  FNode.Bank.SafeBox.StartThreadSafe;
+  try
+    for i := 0 to FWalletKeys.AccountsKeyList.Count-1 do begin
+      inc(LFoundAccounts,FWalletKeys.AccountsKeyList.AccountKeyList[i].Count);
+      if LFoundAccounts>5 then Break;
+    end;
+  finally
+    FNode.Bank.SafeBox.EndThreadSave;
+  end;
+  if LFoundAccounts<5 then begin
+    // Will only ask if I have less than 5 accounts
+    TPCTNetDataExtraMessages.AskForFreeAccount(GetAccountKeyForMiner);
+  end;
+  {$ENDIF}
 end;
 
 procedure TFRMWallet.CM_WalletChanged(var Msg: TMessage);
@@ -689,8 +743,6 @@ begin
     if (bmax<bmin) or (bmax=0) then bmax := CT_MaxWalletAmount;
     if bmin>bmax then bmin := 0;
     doupd := (bmin<>FMinAccountBalance) Or (bmax<>FMaxAccountBalance);
-    FMinAccountBalance := bmin;
-    FMaxAccountBalance := bmax;
     if bmin>0 then
       ebFilterAccountByBalanceMin.Text:=TAccountComp.FormatMoney(bmin)
     else ebFilterAccountByBalanceMin.Text := '';
@@ -698,9 +750,13 @@ begin
       ebFilterAccountByBalanceMax.Text := TAccountComp.FormatMoney(bmax)
     else ebFilterAccountByBalanceMax.Text := '';
     if cbFilterAccounts.Checked then begin
+      FMinAccountBalance := bmin;
+      FMaxAccountBalance := bmax;
       ebFilterAccountByBalanceMin.ParentFont := true;
       ebFilterAccountByBalanceMax.ParentFont := true;
     end else begin
+      FMinAccountBalance := 0;
+      FMaxAccountBalance := CT_MaxWalletAmount;
       ebFilterAccountByBalanceMin.font.Color := clDkGray;
       ebFilterAccountByBalanceMax.font.Color := clDkGray;
     end;
@@ -792,6 +848,7 @@ begin
 end;
 
 procedure TFRMWallet.FinishedLoadingApp;
+var LLockedMempool : TPCOperationsComp;
 begin
   FNodeNotifyEvents.Node := FNode;
   // Init
@@ -807,8 +864,13 @@ begin
   FPoolMiningServer := TPoolMiningServer.Create;
   FPoolMiningServer.Port := FAppParams.ParamByName[CT_PARAM_JSONRPCMinerServerPort].GetAsInteger(CT_JSONRPCMinerServer_Port);
   FPoolMiningServer.MinerAccountKey := GetAccountKeyForMiner;
-  FPoolMiningServer.MinerPayload := FAppParams.ParamByName[CT_PARAM_MinerName].GetAsString('');
-  FNode.Operations.AccountKey := GetAccountKeyForMiner;
+  FPoolMiningServer.MinerPayload := TEncoding.ANSI.GetBytes( FAppParams.ParamByName[CT_PARAM_MinerName].GetAsString('') );
+  LLockedMempool := FNode.LockMempoolWrite;
+  try
+    LLockedMempool.AccountKey := GetAccountKeyForMiner;
+  finally
+    FNode.UnlockMempoolWrite;
+  end;
   FPoolMiningServer.Active := FAppParams.ParamByName[CT_PARAM_JSONRPCMinerServerActive].GetAsBoolean(true);
   FPoolMiningServer.OnMiningServerNewBlockFound := OnMiningServerNewBlockFound;
   FreeAndNil(FBackgroundLabel);
@@ -826,10 +888,11 @@ procedure TFRMWallet.FillAccountInformation(const Strings: TStrings;
   const AccountNumber: Cardinal);
 Var account : TAccount;
   s : String;
+  LjsonObj : TPCJSONObject;
 begin
   if AccountNumber<0 then exit;
-  account := FNode.Operations.SafeBoxTransaction.Account(AccountNumber);
-  if account.name<>'' then s:='Name: '+account.name
+  account := FNode.GetMempoolAccount(AccountNumber);
+  if Length(account.name)>0 then s:='Name: '+TEncoding.ANSI.GetString(account.name)
   else s:='';
   Strings.Add(Format('Account: %s %s Type:%d',[TAccountComp.AccountNumberToAccountTxtNumber(AccountNumber),s,account.account_type]));
   Strings.Add('');
@@ -838,12 +901,16 @@ begin
   Strings.Add(Format('Updated on block: %d  (%d blocks ago)',[account.updated_block,FNode.Bank.BlocksCount-account.updated_block]));
   Strings.Add(Format('Public key type: %s',[TAccountComp.GetECInfoTxt(account.accountInfo.accountKey.EC_OpenSSL_NID)]));
   Strings.Add(Format('Base58 Public key: %s',[TAccountComp.AccountPublicKeyExport(account.accountInfo.accountKey)]));
+  if Length(account.account_data)>0 then
+    Strings.Add(Format('Account Data: %s',[account.account_data.ToHexaString]))
+  else Strings.Add(Format('Account Data: (No data)',[]));
+  Strings.Add(Format('Account Seal: %s',[account.account_seal.ToHexaString]));
   if TAccountComp.IsAccountForSale(account.accountInfo) then begin
     Strings.Add('');
     Strings.Add('** Account is for sale: **');
     Strings.Add(Format('Price: %s',[TAccountComp.FormatMoney(account.accountInfo.price)]));
     Strings.Add(Format('Seller account (where to pay): %s',[TAccountComp.AccountNumberToAccountTxtNumber(account.accountInfo.account_to_pay)]));
-    if TAccountComp.IsAccountForSaleAcceptingTransactions(account.accountInfo) then begin
+    if TAccountComp.IsAccountForPrivateSale(account.accountInfo) then begin
       Strings.Add('');
       Strings.Add('** Private sale **');
       Strings.Add(Format('New Base58 Public key: %s',[TAccountComp.AccountPublicKeyExport(account.accountInfo.new_publicKey)]));
@@ -856,7 +923,35 @@ begin
           [account.accountInfo.locked_until_block,FNode.Bank.BlocksCount]));
       end;
     end;
+  end else if TAccountComp.IsAccountForSwap(account.accountInfo) then begin
+    Strings.Add('');
+    if TAccountComp.IsAccountForAccountSwap(account.accountInfo) then begin
+      Strings.Add('** Account is for Atomic Account Swap: **');
+      Strings.Add(Format('New Base58 Public key: %s',[TAccountComp.AccountPublicKeyExport(account.accountInfo.new_publicKey)]));
+    end else if TAccountComp.IsAccountForCoinSwap(account.accountInfo) then begin
+      Strings.Add('** Account is for Atomic Coin Swap: **');
+      Strings.Add(Format('Amount to swap: %s',[TAccountComp.FormatMoney(account.accountInfo.price)]));
+      Strings.Add(Format('Counterparty account: %s',[TAccountComp.AccountNumberToAccountTxtNumber(account.accountInfo.account_to_pay)]));
+    end;
+    Strings.Add(Format('Public secret to find: %s',[account.accountInfo.hashed_secret.ToHexaString]));
+    Strings.Add('');
+    if TAccountComp.IsAccountLocked(account.accountInfo,FNode.Bank.BlocksCount) then begin
+      Strings.Add(Format('SWAP IS SECURE UNTIL BLOCK %d (current %d, remains %d)',
+          [account.accountInfo.locked_until_block,FNode.Bank.BlocksCount,account.accountInfo.locked_until_block-FNode.Bank.BlocksCount]));
+    end else begin
+        Strings.Add(Format('SWAP IS NOT SECURE (Expired on block %d, current %d)',
+          [account.accountInfo.locked_until_block,FNode.Bank.BlocksCount]));
+    end;
   end;
+  LjsonObj := TPCJSONObject.Create;
+  Try
+    TPascalCoinJSONComp.FillAccountObject(account,LjsonObj);
+    Strings.Add('ACCOUNT JSON:');
+    Strings.Add(LjsonObj.ToJSON(False));
+  Finally
+    LjsonObj.Free;
+  end;
+
 end;
 
 procedure TFRMWallet.FillOperationInformation(const Strings: TStrings;
@@ -888,10 +983,10 @@ begin
   end;
   Strings.Add(Format('OpType:%d Subtype:%d',[OperationResume.OpType,OperationResume.OpSubtype]));
   Strings.Add(Format('Operation Hash (ophash): %s',[TCrypto.ToHexaString(OperationResume.OperationHash)]));
-  If (OperationResume.OperationHash_OLD<>'') then begin
+  If (Length(OperationResume.OperationHash_OLD)>0) then begin
     Strings.Add(Format('Old Operation Hash (old_ophash): %s',[TCrypto.ToHexaString(OperationResume.OperationHash_OLD)]));
   end;
-  if (OperationResume.OriginalPayload<>'') then begin
+  if (Length(OperationResume.OriginalPayload)>0) then begin
     Strings.Add(Format('Payload length:%d',[length(OperationResume.OriginalPayload)]));
     If OperationResume.PrintablePayload<>'' then begin
       Strings.Add(Format('Payload (human): %s',[OperationResume.PrintablePayload]));
@@ -904,30 +999,93 @@ begin
   jsonObj := TPCJSONObject.Create;
   Try
     TPascalCoinJSONComp.FillOperationObject(OperationResume,FNode.Bank.BlocksCount,jsonObj);
-    Strings.Add('JSON:');
+    Strings.Add('OPERATION JSON:');
     Strings.Add(jsonObj.ToJSON(False));
   Finally
     jsonObj.Free;
   end;
 end;
 
-{$IFDEF TESTING_NO_POW_CHECK}
+Procedure TFRMWallet.InitMacOSMenu;
+{$IFDEF FPC}
+var
+  mi : TMenuItem;
+  app : TMenuItem;
+{$ENDIF}
+begin
+  {$IFDEF FPC}
+  {$IFNDEF DARWIN}
+  Exit;
+  {$ENDIF}
+  app := TMenuItem.Create(MainMenu);
+  app := TMenuItem.Create(MainMenu);
+  app.Caption:=#$EF#$A3#$BF;
+
+  miAboutPascalCoin.Parent.Remove(miAboutPascalCoin);
+  app.Add(miAboutPascalCoin);
+  {$IFDEF TESTNET}
+  // Things for testing purposes only
+  miAbout.caption := 'Testing';
+  {$ELSE}
+  miAbout.Visible:=false;
+  {$ENDIF}
+
+  // Move "Options" to "Prefernces"
+  mi := TMenuItem.Create(MainMenu);
+  mi.Caption:='-';
+  app.Add(mi);
+  miOptions.Parent.Remove(miOptions);
+  miOptions.Caption:='Preferences...';
+  miOptions.ShortCut:=Menus.ShortCut(VK_OEM_COMMA, [ssMeta]);
+  app.Add(miOptions);
+
+  MiFindaccount.ShortCut:=Menus.ShortCut(VK_F, [ssMeta]);
+  MiOperationsExplorer.ShortCut:=Menus.ShortCut(VK_E, [ssMeta]);
+  MiFindpreviousaccountwithhighbalance.ShortCut:=Menus.Shortcut(VK_F3, [ssMeta]);
+  miOptions.ShortCut:=Menus.ShortCut(VK_OEM_COMMA, [ssMeta]); // match preferences
+  miPrivatekeys.ShortCut:=Menus.Shortcut(VK_P, [ssMeta]);
+
+  N1.Visible:=false;
+  MiClose.Visible:=false;
+
+  MainMenu.Items.Insert(0, app);
+  {$endif}
+end;
+
+
+{$IFDEF TESTNET}
 procedure TFRMWallet.InitMenuForTesting;
 var mi : TMenuItem;
 begin
   mi := TMenuItem.Create(MainMenu);
   mi.Caption:='-';
   miAbout.Add(mi);
+  {$IFDEF TESTING_NO_POW_CHECK}
   mi := TMenuItem.Create(MainMenu);
   mi.Caption:='Create a block';
   mi.OnClick:=Test_CreateABlock;
   miAbout.Add(mi);
+  {$ENDIF}
   mi := TMenuItem.Create(MainMenu);
   mi.Caption:='Show public keys state';
   mi.OnClick:=Test_ShowPublicKeys;
   miAbout.Add(mi);
+  mi := TMenuItem.Create(MainMenu);
+  mi.Caption:='Create Random operations';
+  mi.OnClick:=Test_RandomOperations;
+  miAbout.Add(mi);
+  mi := TMenuItem.Create(MainMenu);
+  mi.Caption:='Ask for Free Account';
+  mi.OnClick:=Test_AskForFreeAccount;
+  miAbout.Add(mi);
+  mi := TMenuItem.Create(MainMenu);
+  mi.Caption:='Diagnostic Tool';
+  mi.OnClick:=Test_ShowDiagnosticTool;
+  miAbout.Add(mi);
+
 end;
 
+{$IFDEF TESTING_NO_POW_CHECK}
 procedure TFRMWallet.Test_CreateABlock(Sender: TObject);
 var ops : TPCOperationsComp;
   nba : TBlockAccount;
@@ -949,6 +1107,30 @@ begin
   Raise Exception.Create('NOT ALLOWED!');
   {$ENDIF}
 end;
+{$ENDIF}
+
+procedure TFRMWallet.Test_RandomOperations(Sender: TObject);
+Var FRM : TFRMRandomOperations;
+begin
+  FRM := TFRMRandomOperations.Create(Self);
+  Try
+    FRM.SourceNode := FNode;
+    FRM.SourceWalletKeys := FWalletKeys;
+    FRM.ShowModal;
+  finally
+    FRM.Free;
+  end;
+end;
+
+Procedure TFRMWallet.Test_AskForFreeAccount(Sender: TObject);
+var i : Integer;
+begin
+  i := TPCTNetDataExtraMessages.AskForFreeAccount(GetAccountKeyForMiner);
+  if i>0 then ShowMessage(Format('Asked for a free account to %d nodes...',[i]))
+  else ShowMessage('Sorry. No nodes available to ask for a free account');
+end;
+
+{$ENDIF}
 
 procedure TFRMWallet.Test_ShowPublicKeys(Sender: TObject);
 var F : TFRMMemoText;
@@ -956,7 +1138,7 @@ var F : TFRMMemoText;
   sl : TStrings;
   ak : TAccountKey;
   nmin,nmax : Integer;
-  l : TList;
+  l : TList<Pointer>;
   Pacsd : PAccountKeyStorageData;
   acc : TAccount;
 begin
@@ -1014,7 +1196,6 @@ begin
     sl.Free;
   end;
 end;
-{$ENDIF}
 
 function TFRMWallet.ForceMining: Boolean;
 begin
@@ -1032,6 +1213,15 @@ end;
 procedure TFRMWallet.FormCreate(Sender: TObject);
 Var i : Integer;
 begin
+  {$IFNDEF FPC}
+  {$IFDEF TESTNET}
+  System.ReportMemoryLeaksOnShutdown := True; // Delphi memory leaks testing
+  {$ENDIF}
+  {$ENDIF}
+  {$IFDEF TESTNET}
+  FLastAskForAccountTC := 0;
+  {$ENDIF}
+  FLastAccountsGridInvalidateTC := TPlatform.GetTickCount;
   FLastNodesCacheUpdatedTS := Now;
   FBackgroundPanel := Nil;
   FBackgroundLabel := Nil;
@@ -1051,7 +1241,6 @@ begin
   memoMessages.Lines.Clear;
   memoMessageToSend.Lines.Clear;
   FUpdating := false;
-  FOrderedAccountsKeyList := Nil;
   TimerUpdateStatus.Enabled := false;
   FIsActivated := false;
   FWalletKeys := TWalletKeysExt.Create(Self);
@@ -1071,7 +1260,10 @@ begin
   FAccountsGrid := TAccountsGrid.Create(Self);
   FAccountsGrid.DrawGrid := dgAccounts;
   FAccountsGrid.AllowMultiSelect := True;
+  FAccountsGrid.OnAccountsGridUpdatedData := OnAccountsGridUpdatedData;
+  FAccountsGrid.AccountsGridDatasource := acds_Node;
   FSelectedAccountsGrid := TAccountsGrid.Create(Self);
+  FSelectedAccountsGrid.AccountsGridDatasource := acds_InternalList;
   FSelectedAccountsGrid.DrawGrid := dgSelectedAccounts;
   FSelectedAccountsGrid.OnUpdated := OnSelectedAccountsGridUpdated;
   FOperationsAccountGrid := TOperationsGrid.Create(Self);
@@ -1126,10 +1318,14 @@ begin
   cbHashRateUnits.Items.Add('Th/s');
   cbHashRateUnits.Items.Add('Ph/s');
   cbHashRateUnits.Items.Add('Eh/s');
-  {$IFDEF TESTING_NO_POW_CHECK}
+  {$IFDEF TESTNET}
   // Things for testing purposes only
   InitMenuForTesting;
   {$ENDIF}
+  {$ifdef DARWIN}
+  // this is macOS specific menu layout
+  InitMacOSMenu;
+  {$endif}
 end;
 
 procedure TFRMWallet.ebHashRateBackBlocksKeyPress(Sender: TObject; var Key: char);
@@ -1217,9 +1413,6 @@ begin
   FreeAndNil(FOperationsExplorerGrid);
   FreeAndNil(FBlockChainGrid);
 
-  step := 'Ordered Accounts Key list';
-  FreeAndNil(FOrderedAccountsKeyList);
-
   step := 'Desactivating Node';
   TNode.Node.NetServer.Active := false;
   FNode := Nil;
@@ -1295,24 +1488,24 @@ begin
   case FMinerPrivateKeyType of
     mpk_NewEachTime: PublicK := CT_TECDSA_Public_Nul;
     mpk_Selected: begin
-      PublicK := TAccountComp.RawString2Accountkey(FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].GetAsString(''));
+      PublicK := TAccountComp.RawString2Accountkey(FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].GetAsTBytes(Nil));
     end;
   else
     // Random
     PublicK := CT_TECDSA_Public_Nul;
     if FWalletKeys.Count>0 then begin
       i := Random(FWalletKeys.Count);
-      if (FWalletKeys.Key[i].CryptedKey='') then begin
+      if (Length(FWalletKeys.Key[i].CryptedKey)=0) then begin
         // Not valid, search for first valid:
         i:=0;
-        while (i<FWalletKeys.Count) And (FWalletKeys.Key[i].CryptedKey='') do inc(i);
+        while (i<FWalletKeys.Count) And (Length(FWalletKeys.Key[i].CryptedKey)=0) do inc(i);
         if i<FWalletKeys.Count then PublicK := FWalletKeys.Key[i].AccountKey;
       end else PublicK := FWalletKeys.Key[i].AccountKey;
     end;
   end;
   i := FWalletKeys.IndexOfAccountKey(PublicK);
   if i>=0 then begin
-    if (FWalletKeys.Key[i].CryptedKey='') then i:=-1;
+    if (Length(FWalletKeys.Key[i].CryptedKey)=0) then i:=-1;
   end;
   if i<0 then begin
     PK := TECPrivateKey.Create;
@@ -1322,7 +1515,7 @@ begin
       PublicK := PK.PublicKey;
       // Set to AppParams if not mpk_NewEachTime
       if (FMinerPrivateKeyType<>mpk_NewEachTime) then begin
-        FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].Value:=TAccountComp.AccountKey2RawString(PublicK);
+        FAppParams.ParamByName[CT_PARAM_MinerPrivateKeySelectedPublicKey].SetAsTBytes(TAccountComp.AccountKey2RawString(PublicK));
         FMinerPrivateKeyType:=mpk_Selected;
         FAppParams.ParamByName[CT_PARAM_MinerPrivateKeyType].Value := Integer(mpk_Selected);
       end;
@@ -1459,6 +1652,18 @@ begin
   end;
 end;
 
+procedure TFRMWallet.Test_ShowDiagnosticTool(Sender: TObject);
+var
+ LDialog : TFRMDiagnosticTool;
+begin
+  LDialog := TFRMDiagnosticTool.Create(Nil);
+  try
+    LDialog.ShowModal;
+  finally
+    LDialog.Free;
+  end;
+end;
+
 procedure TFRMWallet.MiFindaccountClick(Sender: TObject);
 begin
   PageControl.ActivePage := tsMyAccounts;
@@ -1589,6 +1794,17 @@ begin
   sbSelectedAccountsDelClick(Sender);
 end;
 
+procedure TFRMWallet.OnAccountsGridUpdatedData(Sender: TObject);
+begin
+  if FAccountsGrid.IsUpdatingData then begin
+    lblAccountsCount.Caption := '(Calculating)';
+    lblAccountsBalance.Caption := '(Calculating)';
+  end else begin
+    lblAccountsCount.Caption := IntToStr(FAccountsGrid.AccountsCount);
+    lblAccountsBalance.Caption := TAccountComp.FormatMoney(FAccountsGrid.AccountsBalance);
+  end;
+end;
+
 procedure TFRMWallet.OnMiningServerNewBlockFound(Sender: TObject);
 begin
   FPoolMiningServer.MinerAccountKey := GetAccountKeyForMiner;
@@ -1598,7 +1814,7 @@ procedure TFRMWallet.OnNetBlackListUpdated(Sender: TObject);
 Const CT_TRUE_FALSE : Array[Boolean] Of AnsiString = ('FALSE','TRUE');
 Var i,j,n : integer;
  P : PNodeServerAddress;
- l : TList;
+ l : TList<Pointer>;
  strings : TStrings;
 begin
   l := TNetData.NetData.NodeServersAddresses.LockList;
@@ -1641,7 +1857,7 @@ end;
 procedure TFRMWallet.OnNetNodeServersUpdated(Sender: TObject);
 Var i : integer;
  P : PNodeServerAddress;
- l : TList;
+ l : TList<Pointer>;
  strings : TStrings;
  s : String;
 begin
@@ -1722,7 +1938,7 @@ begin
   end;
 end;
 
-procedure TFRMWallet.OnNewLog(logtype: TLogType; Time : TDateTime; ThreadID : TThreadID; const sender,logtext: AnsiString);
+procedure TFRMWallet.OnNewLog(logtype: TLogType; Time : TDateTime; ThreadID : TThreadID; const sender,logtext: String);
 Var s : AnsiString;
 begin
   if (logtype=ltdebug) And (Not cbShowDebugLogs.Checked) then exit;
@@ -1740,7 +1956,7 @@ begin
   //
 end;
 
-procedure TFRMWallet.OnNodeMessageEvent(NetConnection: TNetConnection; MessageData: TRawBytes);
+procedure TFRMWallet.OnNodeMessageEvent(NetConnection: TNetConnection; MessageData: String);
 Var s : String;
 begin
   inc(FMessagesUnreadCount);
@@ -1751,11 +1967,11 @@ begin
     if FAppParams.ParamByName[CT_PARAM_ShowModalMessages].GetAsBoolean(false) then begin
       s := DateTimeToStr(now)+' Message from '+NetConnection.ClientRemoteAddr+#10+
          'Length '+inttostr(length(MessageData))+' bytes'+#10+#10;
-      if TCrypto.IsHumanReadable(MessageData) then begin
+      if TCrypto.IsHumanReadable(TEncoding.ANSI.GetBytes(MessageData)) then begin
          s := s + MessageData;
       end else begin
          s := s +'Value in hexadecimal:'+#10+
-              TCrypto.ToHexaString(MessageData);
+              TCrypto.ToHexaString(TEncoding.ANSI.GetBytes(MessageData));
       end;
       Application.MessageBox(PChar(s),PChar(Application.Title),MB_ICONINFORMATION+MB_OK);
     end;
@@ -1807,11 +2023,11 @@ procedure TFRMWallet.PageControlChange(Sender: TObject);
 begin
   MiDecodePayload.Enabled := false;
   if PageControl.ActivePage=tsMyAccounts then begin
-    //FAccountsGrid.Node := FNode;
+    FAccountsGrid.Node := FNode;
     MiDecodePayload.Enabled := true;
     FSelectedAccountsGrid.Node := FNode;
   end else begin
-    //FAccountsGrid.Node := Nil;
+    FAccountsGrid.Node := Nil;
     FSelectedAccountsGrid.Node := Nil;
   end;
   if PageControl.ActivePage=tsPendingOperations then begin
@@ -1942,87 +2158,58 @@ Var accl : TOrderedCardinalList;
   l : TOrderedCardinalList;
   i,j,k : Integer;
   c  : Cardinal;
-  applyfilter : Boolean;
+  LApplyfilter : Boolean;
   acc : TAccount;
+  LFilters : TAccountsGridFilter;
 begin
-  If Not Assigned(FOrderedAccountsKeyList) Then exit;
+  If Not Assigned(FWalletKeys) Then exit;
+  if Not Assigned(FNode) then Exit;
+
   if Not RefreshData then begin
-    dgAccounts.Invalidate;
+    if TPlatform.GetElapsedMilliseconds(FLastAccountsGridInvalidateTC)>1000 then begin
+      FLastAccountsGridInvalidateTC := TPlatform.GetTickCount;
+      dgAccounts.Invalidate;
+    end;
     exit;
   end;
-  applyfilter := (cbFilterAccounts.Checked) and ((FMinAccountBalance>0) Or (FMaxAccountBalance<CT_MaxWalletAmount));
-  FAccountsGrid.ShowAllAccounts := (Not cbExploreMyAccounts.Checked) And (not applyfilter);
-  if Not FAccountsGrid.ShowAllAccounts then begin
-    accl := FAccountsGrid.LockAccountsList;
-    Try
-      accl.Clear;
-      if cbExploreMyAccounts.Checked then begin
-        if cbMyPrivateKeys.ItemIndex<0 then exit;
-        if cbMyPrivateKeys.ItemIndex=0 then begin
-          // All keys in the wallet
-          for i := 0 to FWalletKeys.Count - 1 do begin
-            FOrderedAccountsKeyList.Lock; // Protection v4
-            Try
-              j := FOrderedAccountsKeyList.IndexOfAccountKey(FWalletKeys[i].AccountKey);
-              if (j>=0) then begin
-                l := FOrderedAccountsKeyList.AccountKeyList[j];
-                for k := 0 to l.Count - 1 do begin
-                  if applyfilter then begin
-                    acc := FNode.Bank.SafeBox.Account(l.Get(k));
-                    if (acc.balance>=FMinAccountBalance) And (acc.balance<=FMaxAccountBalance) then accl.Add(acc.account);
-                  end else accl.Add(l.Get(k));
-                end;
-              end;
-            finally
-              FOrderedAccountsKeyList.Unlock;
-            end;
-          end;
-        end else begin
+  LApplyfilter := (cbFilterAccounts.Checked) and ((FMinAccountBalance>0) Or ((FMaxAccountBalance<CT_MaxWalletAmount) and (FMaxAccountBalance>=0)));
+  if (Not cbExploreMyAccounts.Checked) And (not LApplyfilter) then begin
+    FAccountsGrid.AccountsGridDatasource := acds_Node;
+    FAccountsGrid.UpdateData;
+  end else begin
+    LFilters := FAccountsGrid.AccountsGridFilter;
+    LFilters.MinBalance := FMinAccountBalance;
+    LFilters.MaxBalance := FMaxAccountBalance;
+    if cbExploreMyAccounts.Checked then begin
+      FNode.Bank.SafeBox.StartThreadSafe;
+      try
+        LFilters.OrderedAccountsKeyList := FWalletKeys.AccountsKeyList;
+        if cbMyPrivateKeys.ItemIndex>0 then begin
           i := PtrInt(cbMyPrivateKeys.Items.Objects[cbMyPrivateKeys.ItemIndex]);
           if (i>=0) And (i<FWalletKeys.Count) then begin
-            FOrderedAccountsKeyList.Lock; // Protection v4
-            Try
-              j := FOrderedAccountsKeyList.IndexOfAccountKey(FWalletKeys[i].AccountKey);
-              if (j>=0) then begin
-                l := FOrderedAccountsKeyList.AccountKeyList[j];
-                for k := 0 to l.Count - 1 do begin
-                  if applyfilter then begin
-                    acc := FNode.Bank.SafeBox.Account(l.Get(k));
-                    if (acc.balance>=FMinAccountBalance) And (acc.balance<=FMaxAccountBalance) then accl.Add(acc.account);
-                  end else accl.Add(l.Get(k));
-                end;
-              end;
-            finally
-              FOrderedAccountsKeyList.Unlock;
-            end;
+            LFilters.indexAccountsKeyList := FWalletKeys.AccountsKeyList.IndexOfAccountKey(FWalletKeys[i].AccountKey);
           end;
-        end;
-      end else begin
-        // There is a filter... check every account...
-        c := 0;
-        while (c<FNode.Bank.SafeBox.AccountsCount) do begin
-          acc := FNode.Bank.SafeBox.Account(c);
-          if (acc.balance>=FMinAccountBalance) And (acc.balance<=FMaxAccountBalance) then accl.Add(acc.account);
-          inc(c);
-        end;
+        end else LFilters.indexAccountsKeyList := -1;
+      finally
+        FNode.Bank.SafeBox.EndThreadSave;
       end;
-    Finally
-      FAccountsGrid.UnlockAccountsList;
-    End;
-    lblAccountsCount.Caption := inttostr(accl.Count);
-  end else begin
-    lblAccountsCount.Caption := inttostr(FNode.Bank.AccountsCount);
+    end else begin
+      LFilters.OrderedAccountsKeyList := Nil;
+      LFilters.indexAccountsKeyList := -1;
+    end;
+    FAccountsGrid.AccountsGridFilter := LFilters;
+    FAccountsGrid.AccountsGridDatasource := acds_NodeFiltered;
   end;
+
   bbChangeKeyName.Enabled := cbExploreMyAccounts.Checked;
-  // Show Totals:
-  lblAccountsBalance.Caption := TAccountComp.FormatMoney(FAccountsGrid.AccountsBalance);
+  OnAccountsGridUpdatedData(Nil);
   UpdateOperations;
 end;
 
 procedure TFRMWallet.UpdateAvailableConnections;
 Var i : integer;
  NC : TNetConnection;
- l : TList;
+ l : TList<TNetConnection>;
 begin
   if Not TNetData.NetData.NetConnections.TryLockList(100,l) then exit;
   try
@@ -2053,27 +2240,25 @@ end;
 
 procedure TFRMWallet.UpdateBlockChainState;
 Var isMining : boolean;
-//  hr : Int64;
   i,mc : Integer;
   s : String;
-  mtl : TList;
   f, favg : real;
+  LLockedMempool : TPCOperationsComp;
 begin
   UpdateNodeStatus;
   mc := 0;
-//  hr := 0;
   if Assigned(FNode) then begin
     if FNode.Bank.BlocksCount>0 then begin
       lblCurrentBlock.Caption :=  Inttostr(FNode.Bank.BlocksCount)+' (0..'+Inttostr(FNode.Bank.BlocksCount-1)+')'; ;
     end else lblCurrentBlock.Caption :=  '(none)';
     lblCurrentAccounts.Caption := Inttostr(FNode.Bank.AccountsCount);
     lblCurrentBlockTime.Caption := UnixTimeToLocalElapsedTime(FNode.Bank.LastOperationBlock.timestamp);
-    FNode.Operations.Lock;
+    LLockedMempool := FNode.LockMempoolRead;
     try
-      lblOperationsPending.Caption := Inttostr(FNode.Operations.Count);
-      lblCurrentDifficulty.Caption := InttoHex(FNode.Operations.OperationBlock.compact_target,8);
+      lblOperationsPending.Caption := Inttostr(LLockedMempool.Count);
+      lblCurrentDifficulty.Caption := InttoHex(LLockedMempool.OperationBlock.compact_target,8);
     finally
-      FNode.Operations.Unlock;
+      FNode.UnlockMempoolRead;
     end;
     favg := FNode.Bank.GetActualTargetSecondsAverage(CT_CalcNewTargetBlocksAverage);
     f := (CT_NewLineSecondsAvg - favg) / CT_NewLineSecondsAvg;
@@ -2118,6 +2303,7 @@ end;
 procedure TFRMWallet.UpdateConfigChanged;
 Var wa : Boolean;
   i : Integer;
+  LLockedMempool : TPCOperationsComp;
 begin
   tsLogs.TabVisible := FAppParams.ParamByName[CT_PARAM_ShowLogs].GetAsBoolean(false);
   if (Not tsLogs.TabVisible) then begin
@@ -2136,7 +2322,12 @@ begin
     wa := FNode.NetServer.Active;
     FNode.NetServer.Port := FAppParams.ParamByName[CT_PARAM_InternetServerPort].GetAsInteger(CT_NetServer_Port);
     FNode.NetServer.Active := wa;
-    FNode.Operations.BlockPayload := FAppParams.ParamByName[CT_PARAM_MinerName].GetAsString('');
+    LLockedMempool := FNode.LockMempoolWrite;
+    try
+      LLockedMempool.BlockPayload := TEncoding.ANSI.GetBytes(FAppParams.ParamByName[CT_PARAM_MinerName].GetAsString(''));
+    finally
+      FNode.UnlockMempoolWrite;
+    end;
     FNode.NodeLogFilename := TFolderHelper.GetPascalCoinDataFolder+PathDelim+'blocks.log';
   end;
   if Assigned(FPoolMiningServer) then begin
@@ -2145,7 +2336,7 @@ begin
       FPoolMiningServer.Port := FAppParams.ParamByName[CT_PARAM_JSONRPCMinerServerPort].GetAsInteger(CT_JSONRPCMinerServer_Port);
     end;
     FPoolMiningServer.Active :=FAppParams.ParamByName[CT_PARAM_JSONRPCMinerServerActive].GetAsBoolean(true);
-    FPoolMiningServer.UpdateAccountAndPayload(GetAccountKeyForMiner,FAppParams.ParamByName[CT_PARAM_MinerName].GetAsString(''));
+    FPoolMiningServer.UpdateAccountAndPayload(GetAccountKeyForMiner,TEncoding.ANSI.GetBytes(FAppParams.ParamByName[CT_PARAM_MinerName].GetAsString('')));
   end;
   if Assigned(FRPCServer) then begin
     FRPCServer.Active := FAppParams.ParamByName[CT_PARAM_JSONRPCEnabled].GetAsBoolean(false);
@@ -2165,10 +2356,15 @@ begin
     hr_Exa : cbHashRateUnits.ItemIndex:=6;
   else cbHashRateUnits.ItemIndex:=-1;
   end;
+  if TNetData.NetDataExists then begin
+    if FAppParams.ParamByName[CT_PARAM_AllowDownloadNewCheckpointIfOlderThan].GetAsBoolean(TNetData.NetData.MinFutureBlocksToDownloadNewSafebox>200) then begin
+      TNetData.NetData.MinFutureBlocksToDownloadNewSafebox:=FAppParams.ParamByName[CT_PARAM_MinFutureBlocksToDownloadNewSafebox].GetAsInteger(TNetData.NetData.MinFutureBlocksToDownloadNewSafebox);
+    end else TNetData.NetData.MinFutureBlocksToDownloadNewSafebox:=0;
+  end;
 end;
 
 procedure TFRMWallet.UpdateConnectionStatus;
-var errors : AnsiString;
+var errors : String;
 begin
   UpdateNodeStatus;
   OnNetStatisticsChanged(Nil);
@@ -2185,7 +2381,7 @@ begin
 end;
 
 procedure TFRMWallet.UpdateNodeStatus;
-Var status : AnsiString;
+Var status : String;
 begin
   If Not Assigned(FNode) then begin
     lblNodeStatus.Font.Color := clRed;
@@ -2228,36 +2424,24 @@ Var i,last_i : Integer;
   wk : TWalletKey;
   s : AnsiString;
 begin
-  If (Not Assigned(FOrderedAccountsKeyList)) And (Assigned(FNode)) Then begin
-    FOrderedAccountsKeyList := TOrderedAccountKeysList.Create(FNode.Bank.SafeBox,false);
-    FNodeNotifyEvents.WatchKeys := FOrderedAccountsKeyList;
-  end;
+  FNodeNotifyEvents.WatchKeys := FWalletKeys.AccountsKeyList;
   if (cbMyPrivateKeys.ItemIndex>=0) then last_i := PtrInt(cbMyPrivateKeys.Items.Objects[cbMyPrivateKeys.ItemIndex])
   else last_i := -1;
   cbMyPrivateKeys.items.BeginUpdate;
   Try
     cbMyPrivateKeys.Items.Clear;
-    if assigned(FOrderedAccountsKeyList) then FOrderedAccountsKeyList.SafeBox.StartThreadSafe;
-    Try
     For i:=0 to FWalletKeys.Count-1 do begin
       wk := FWalletKeys.Key[i];
-      if assigned(FOrderedAccountsKeyList) then begin
-        FOrderedAccountsKeyList.AddAccountKey(wk.AccountKey);
-      end;
       if (wk.Name='') then begin
         s := 'Sha256='+TCrypto.ToHexaString( TCrypto.DoSha256( TAccountComp.AccountKey2RawString(wk.AccountKey) ) );
       end else begin
         s := wk.Name;
       end;
       if Not Assigned(wk.PrivateKey) then begin
-        if wk.CryptedKey<>'' then s:=s+' (Encrypted, need password)';
-        s:=s+' (* without key)';
+        if Length(wk.CryptedKey)>0 then s:=s+' (**NEED PASSWORD**)'
+        else s:=s+' (**PUBLIC KEY ONLY**)';
       end;
       cbMyPrivateKeys.Items.AddObject(s,TObject(i));
-    end;
-
-    finally
-      if assigned(FOrderedAccountsKeyList) then FOrderedAccountsKeyList.SafeBox.EndThreadSave;
     end;
     cbMyPrivateKeys.Sorted := true;
     cbMyPrivateKeys.Sorted := false;

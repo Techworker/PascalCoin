@@ -30,7 +30,7 @@ uses
 {$ENDIF}
   Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
   Dialogs, UAccounts, Grids, StdCtrls, Buttons, ExtCtrls, UWallet, UNode,
-  UGridUtils, UConst, UThread;
+  UGridUtils, UConst, UThread, UPCOrderedLists, UBaseTypes;
 
 const
   CT_AS_MyAccounts = $0001;
@@ -46,7 +46,7 @@ type
     onlyForPublicSale,
     onlyForPrivateSaleToMe : Boolean;
     minBal,maxBal : Int64;
-    searchName : AnsiString;
+    searchName : TRawBytes;
   end;
 
   TSearchProcedure = procedure(Const searchFound : TCardinalsArray; const searchValues : TSearchValues) of object;
@@ -158,13 +158,15 @@ procedure TSearchThread.BCExecute;
     account : TAccount;
     isValid : Boolean;
     validAccKey : Boolean;
-    errors : AnsiString;
+    errors : String;
     i : Integer;
+    LBlocksCount : Integer;
   begin
     SetLength(FAccounts,0);
     c := 0;
     maxC := FSearchValues.SafeBox.AccountsCount-1;
     validAccKey := TAccountComp.IsValidAccountKey(FSearchValues.inAccountKey,errors);
+    LBlocksCount := FSearchValues.SafeBox.BlocksCount;
     while (c<=maxC) And (Not Terminated) And (Not FDoStopSearch) do begin
       account := FSearchValues.SafeBox.Account(c);
       isValid := True;
@@ -177,17 +179,19 @@ procedure TSearchThread.BCExecute;
         isValid := TAccountComp.IsAccountForSale(account.accountInfo);
       end;
       If IsValid and (FSearchValues.onlyForPublicSale) then begin
-        isValid := (TAccountComp.IsAccountForSale(account.accountInfo)) And (Not TAccountComp.IsAccountForSaleAcceptingTransactions(account.accountInfo));
+        isValid := TAccountComp.IsAccountForPublicSale(account.accountInfo);
       end;
       If IsValid and (FSearchValues.onlyForPrivateSaleToMe) then begin
-        isValid := (TAccountComp.IsAccountForSaleAcceptingTransactions(account.accountInfo)) And
-          (Assigned(FSearchValues.inWalletKeys)) And (FSearchValues.inWalletKeys.IndexOfAccountKey(account.accountInfo.new_publicKey)>=0);
+        isValid := ((TAccountComp.IsAccountForPrivateSale(account.accountInfo) OR
+                    TAccountComp.IsAccountForAccountSwap(account.accountInfo)) AND
+                    (Assigned(FSearchValues.inWalletKeys)) And (FSearchValues.inWalletKeys.IndexOfAccountKey(account.accountInfo.new_publicKey)>=0)) OR
+                    (True {TODO: TAccountComp.IsAccountForCoinSwap(account.accountInfo) AND account.accountInfo.account_to_pay in [MyListOfAccounts]});
       end;
       If IsValid then begin
         IsValid := (account.balance>=FSearchValues.minBal) And ((FSearchValues.maxBal<0) Or (account.balance<=FSearchValues.maxBal));
       end;
-      If IsValid And (FSearchValues.searchName<>'') then begin
-        i := ansipos(FSearchValues.searchName,account.name);
+      If IsValid And (Length(FSearchValues.searchName)>0) then begin
+        i := TBaseType.FindIn(FSearchValues.searchName,account.name);
         IsValid := i>0;
       end;
       //
@@ -497,20 +501,20 @@ begin
     ebMaxBalance.Font.Color:=clGray;
   end;
   if (cbAccountsName.Checked) then begin
-    searchValues.searchName := LowerCase(Trim(ebAccountName.Text));
+    searchValues.searchName.FromString(ebAccountName.Text);
     ebAccountName.ParentFont:=True;
   end else begin
-    searchValues.searchName:='';
+    searchValues.searchName:=Nil;
     ebAccountName.Font.Color := clGray;
   end;
   If (searchValues.inAccountKey.EC_OpenSSL_NID=0) AND (searchValues.inWalletKeys=Nil) And (searchValues.maxBal<0) And (searchValues.minBal<=0) And
      (Not searchValues.onlyForPrivateSaleToMe) And (Not searchValues.onlyForPublicSale) And (Not searchValues.onlyForSale) And
-     (searchValues.searchName='') then begin
-    FAccountsGrid.ShowAllAccounts:=True;
+     (Length(searchValues.searchName)=0) then begin
+    FAccountsGrid.AccountsGridDatasource := acds_Node;
     lblAccountsCount.Caption := IntToStr(FAccountsGrid.Node.Bank.SafeBox.AccountsCount);
     lblAccountsBalance.Caption := TAccountComp.FormatMoney(FAccountsGrid.AccountsBalance);
   end else begin
-    FAccountsGrid.ShowAllAccounts:=False;
+    FAccountsGrid.AccountsGridDatasource := acds_InternalList;
     FSearchThread.DoSearch(searchValues);
   end;
 end;

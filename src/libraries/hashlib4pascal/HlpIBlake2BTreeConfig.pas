@@ -7,19 +7,34 @@ interface
 type
   IBlake2BTreeConfig = interface(IInterface)
     ['{3EFB1A70-4478-4375-BAF6-EF17B3673DA8}']
-    function GetIntermediateHashSize: Int32;
-    procedure SetIntermediateHashSize(value: Int32);
-    property IntermediateHashSize: Int32 read GetIntermediateHashSize
-      write SetIntermediateHashSize;
-    function GetMaxHeight: Int32;
-    procedure SetMaxHeight(value: Int32);
-    property MaxHeight: Int32 read GetMaxHeight write SetMaxHeight;
-    function GetLeafSize: Int64;
-    procedure SetLeafSize(value: Int64);
-    property LeafSize: Int64 read GetLeafSize write SetLeafSize;
-    function GetFanOut: Int32;
-    procedure SetFanOut(value: Int32);
-    property FanOut: Int32 read GetFanOut write SetFanOut;
+
+    function GetFanOut: Byte;
+    procedure SetFanOut(AValue: Byte);
+    property FanOut: Byte read GetFanOut write SetFanOut;
+
+    function GetMaxDepth: Byte;
+    procedure SetMaxDepth(AValue: Byte);
+    property MaxDepth: Byte read GetMaxDepth write SetMaxDepth;
+
+    function GetNodeDepth: Byte;
+    procedure SetNodeDepth(AValue: Byte);
+    property NodeDepth: Byte read GetNodeDepth write SetNodeDepth;
+
+    function GetInnerHashSize: Byte;
+    procedure SetInnerHashSize(AValue: Byte);
+    property InnerHashSize: Byte read GetInnerHashSize write SetInnerHashSize;
+
+    function GetLeafSize: UInt32;
+    procedure SetLeafSize(AValue: UInt32);
+    property LeafSize: UInt32 read GetLeafSize write SetLeafSize;
+
+    function GetNodeOffset: UInt64;
+    procedure SetNodeOffset(AValue: UInt64);
+    property NodeOffset: UInt64 read GetNodeOffset write SetNodeOffset;
+
+    function GetIsLastNode: Boolean;
+    procedure SetIsLastNode(AValue: Boolean);
+    property IsLastNode: Boolean read GetIsLastNode write SetIsLastNode;
 
   end;
 

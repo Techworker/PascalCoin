@@ -103,7 +103,9 @@ unit URandomHash;
 
 interface
 
-uses Generics.Collections, SysUtils, HlpIHash, HlpBits, HlpHashFactory;
+uses {$IFNDEF FPC}System.Generics.Collections{$ELSE}Generics.Collections{$ENDIF},
+     SysUtils, HlpIHash, HlpBits, HlpHashFactory,
+     UCommon;
 
 type
 
@@ -115,7 +117,7 @@ type
       M = (10 * 1024) * 5; // The memory expansion unit (in bytes), total bytes per nonce = M * (2^N (N-2) + 2)
 
     {$IFNDEF UNITTESTS}private{$ELSE}public{$ENDIF}
-      FMurmurHash3_x86_32 : IHash;
+      FMurmur3 : IHash;
       FHashAlg : array[0..17] of IHash;  // declared here to avoid race-condition during mining
       function ContencateByteArrays(const AChunk1, AChunk2: TBytes): TBytes; inline;
       function MemTransform1(const AChunk: TBytes): TBytes; inline;
@@ -159,6 +161,7 @@ type
         FComputedIndex : Integer;
         FChecksum : UInt32;
         FMurMur3 : IHash;
+
         function GetCount : Integer;
         function CalculateChecksum : UInt32;
       public
@@ -182,12 +185,14 @@ type
     private
       function GetCachedHeader : TBytes;
     {$IFNDEF UNITTESTS}private{$ELSE}public{$ENDIF}
-      FMurmurHash3_x86_32 : IHash;
+      FMurmur3 : IHash;
       FHashAlg : array[0..17] of IHash;  // declared here to avoid race-condition during mining
       FCachedHeader : TBytes;
       FCachedNonce : UInt32;
       FCachedOutput : TChecksummedByteCollection;
-
+      FMemStats : TStatistics;
+      FCaptureMemStats : Boolean;
+      FEnableCache : Boolean;
       procedure MemTransform1(var ABuffer: TBytes; AReadStart, AWriteStart, ALength : Integer); inline;
       procedure MemTransform2(var ABuffer: TBytes; AReadStart, AWriteStart, ALength : Integer); inline;
       procedure MemTransform3(var ABuffer: TBytes; AReadStart, AWriteStart, ALength : Integer); inline;
@@ -206,6 +211,9 @@ type
     public
       property NextHeader : TBytes read GetCachedHeader;
       property NextNonce : UInt32 read FCachedNonce;
+      property MemStats : TStatistics read FMemStats;
+      property CaptureMemStats : Boolean read FCaptureMemStats write FCaptureMemStats;
+      property EnableCache : Boolean read FEnableCache write FEnableCache;
       constructor Create;
       destructor Destroy; override;
       function Hash(const ABlockHeader: TBytes): TBytes; overload; inline;
@@ -263,7 +271,7 @@ resourcestring
 
 implementation
 
-uses UCommon, UMemory;
+uses UMemory;
 
 { Global Functions }
 
@@ -279,7 +287,7 @@ end;
 
 constructor TRandomHash.Create;
 begin
-  FMurmurHash3_x86_32 := THashFactory.THash32.CreateMurmurHash3_x86_32();
+  FMurmur3 := THashFactory.THash32.CreateMurmurHash3_x86_32();
   FHashAlg[0] := THashFactory.TCrypto.CreateSHA2_256();
   FHashAlg[1] := THashFactory.TCrypto.CreateSHA2_384();
   FHashAlg[2] := THashFactory.TCrypto.CreateSHA2_512();
@@ -303,7 +311,7 @@ end;
 destructor TRandomHash.Destroy;
 var i : integer;
 begin
- FMurmurHash3_x86_32 := nil;
+ FMurmur3 := nil;
  for i := Low(FHashAlg) to High(FHashAlg) do
    FHashAlg[i] := nil;
  inherited Destroy;
@@ -389,19 +397,19 @@ end;
 
 function TRandomHash.Checksum(const AInput: TBytes): UInt32;
 begin
-  Result := FMurmurHash3_x86_32.ComputeBytes(AInput).GetUInt32;
+  Result := FMurmur3.ComputeBytes(AInput).GetUInt32;
 end;
 
 function TRandomHash.Checksum(const AInput : TArray<TBytes>): UInt32;
 var
   i: Int32;
 begin
-  FMurmurHash3_x86_32.Initialize;
+  FMurmur3.Initialize;
   for i := Low(AInput) to High(AInput) do
   begin
-    FMurmurHash3_x86_32.TransformBytes(AInput[i]);
+    FMurmur3.TransformBytes(AInput[i]);
   end;
-  Result := FMurmurHash3_x86_32.TransformFinal.GetUInt32;
+  Result := FMurmur3.TransformFinal.GetUInt32;
 end;
 
 function TRandomHash.Compress(const AInputs : TArray<TBytes>): TBytes;
@@ -585,7 +593,7 @@ end;
 
 constructor TRandomHashFast.Create;
 begin
-  FMurmurHash3_x86_32 := THashFactory.THash32.CreateMurmurHash3_x86_32();
+  FMurmur3 := THashFactory.THash32.CreateMurmurHash3_x86_32();
   FHashAlg[0] := THashFactory.TCrypto.CreateSHA2_256();
   FHashAlg[1] := THashFactory.TCrypto.CreateSHA2_384();
   FHashAlg[2] := THashFactory.TCrypto.CreateSHA2_512();
@@ -604,12 +612,15 @@ begin
   FHashAlg[15] := THashFactory.TCrypto.CreateMD5();
   FHashAlg[16] := THashFactory.TCrypto.CreateRadioGatun32();
   FHashAlg[17] := THashFactory.TCrypto.CreateWhirlPool();
+  FEnableCache := True;
+  FCaptureMemStats := False;
+  FMemStats.Reset;
 end;
 
 destructor TRandomHashFast.Destroy;
 var i : integer;
 begin
- FMurmurHash3_x86_32 := nil;
+ FMurmur3 := nil;
  for i := Low(FHashAlg) to High(FHashAlg) do
    FHashAlg[i] := nil;
  if Assigned(FCachedOutput) then
@@ -629,11 +640,20 @@ end;
 function TRandomHashFast.Hash(const ABlockHeader: TBytes): TBytes;
 var
   LAllOutputs: TChecksummedByteCollection;
-  LSeed, LTemp: UInt32;
+  LSeed, LTemp, LSize: UInt32;
+  i : Integer;
   LDisposables : TDisposables;
 begin
   LAllOutputs := LDisposables.AddObject( Hash(ABlockHeader, N) ) as TChecksummedByteCollection;
   Result := FHashAlg[0].ComputeBytes(Compress(LAllOutputs)).GetBytes;
+  LSize := 0;
+  for i := 0 to LAllOutputs.Count - 1 do
+    Inc(LSize, Length(LAllOutputs.Get(i)));
+
+  if Assigned(FCachedOutput) then
+    for i := 0 to FCachedOutput.Count - 1 do
+      Inc(LSize, Length(FCachedOutput.Get(i)));
+  FMemStats.AddDatum(LSize);
 end;
 
 function TRandomHashFast.Hash(const ABlockHeader: TBytes; ARound: Int32) : TChecksummedByteCollection;
@@ -678,7 +698,7 @@ begin
     LDisposables.AddObject(LNeighbourOutputs);
 
     // Cache neighbour nonce n-1 calculation if on final round (neighbour will be next nonce)
-    if (ARound = N) then begin
+    if FEnableCache AND (ARound = N) then begin
       FCachedNonce := LNeighbourNonce;
       FCachedHeader := LNeighbourNonceHeader;
       if Assigned(FCachedOutput) then
@@ -740,9 +760,9 @@ end;
 
 function TRandomHashFast.Checksum(const AInput: TBytes; AOffset, ALength: Integer): UInt32;
 begin
-  FMurmurHash3_x86_32.Initialize;
-  FMurmurHash3_x86_32.TransformBytes(AInput, AOffset, ALength);
-  Result := FMurmurHash3_x86_32.TransformFinal.GetUInt32();
+  FMurmur3.Initialize;
+  FMurmur3.TransformBytes(AInput, AOffset, ALength);
+  Result := FMurmur3.TransformFinal.GetUInt32();
 end;
 
 function TRandomHashFast.Compress(const AInputs : TChecksummedByteCollection): TBytes;
@@ -1002,6 +1022,7 @@ end;
 function TRandomHashFast.TChecksummedByteCollection.Clone : TChecksummedByteCollection;
 begin
   Result := TChecksummedByteCollection.Create;
+  FreeAndNil( Result.FBytes ); // Memory Leak prevention prior to create new structure
   Result.FBytes := TList<TBytes>.Create(Self.FBytes);
   Result.FComputedIndex:= Self.FComputedIndex;
   Result.FChecksum:= Self.FChecksum;

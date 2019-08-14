@@ -27,14 +27,14 @@ interface
 {$IFNDEF FPC}
   // See http://wiki.freepascal.org/Code_Conversion_Guide
 type
-  PtrInt = integer;
-  PtrUInt = cardinal;
-  TThreadID = Cardinal;
+  PtrInt = NativeInt;
+  PtrUInt = NativeUInt;
+  TThreadID = NativeUInt;
 {$ENDIF}
 
 Const
   CT_Genesis_Magic_String_For_Old_Block_Hash :
-    AnsiString =
+    String =
     '(c) Albert Molina - Genesis block at same time than BitCoin Block 424720 Hash 000000000000000001cc41ff7846264718ef0a15f97f532a98277bd5f6820b89';
 
   CT_Zero_Block_Proof_of_work_in_Hexa =
@@ -84,6 +84,7 @@ Const
   CT_MaxBlock : Cardinal = $FFFFFFFF;
 
   CT_MaxPayloadSize = 255; // Max payload size in bytes
+  CT_MaxAccountDataSize = 32;
   CT_MaxFutureBlockTimestampOffset = 15;
   CT_MinNodesToCalcNAT = 4;
 
@@ -104,22 +105,29 @@ Const
   CT_Default_EC_OpenSSL_NID = CT_NID_secp256k1;
 
   CT_AccountInfo_ForSale = 1000;
+  CT_AccountInfo_ForAccountSwap = 1001;
+  CT_AccountInfo_ForCoinSwap = 1002;
+
+  CT_HashLockKey_MinBytes = 4;
+  CT_HashLockKey_MaxBytes = 128;
 
   CT_PROTOCOL_1 = 1;
   CT_PROTOCOL_2 = 2;
   CT_PROTOCOL_3 = 3;
   CT_PROTOCOL_4 = 4;
+  CT_PROTOCOL_5 = 5;
   CT_BUILD_PROTOCOL = CT_PROTOCOL_4;
 
   CT_BlockChain_Protocol_Available: Word = 4; // Protocol 4 flag
-  CT_Protocol_Upgrade_v2_MinBlock = {$IFDEF PRODUCTION}115000{$ELSE}50{$ENDIF};
-  CT_Protocol_Upgrade_v3_MinBlock = {$IFDEF PRODUCTION}210000{$ELSE}250{$ENDIF};
-  CT_Protocol_Upgrade_v4_MinBlock = {$IFDEF PRODUCTION}260000{$ELSE}400{$ENDIF};
+  CT_Protocol_Upgrade_v2_MinBlock = {$IFDEF PRODUCTION}115000{$ELSE}47{$ENDIF};
+  CT_Protocol_Upgrade_v3_MinBlock = {$IFDEF PRODUCTION}210000{$ELSE}48{$ENDIF};
+  CT_Protocol_Upgrade_v4_MinBlock = {$IFDEF PRODUCTION}260000{$ELSE}49{$ENDIF};
+  CT_Protocol_Upgrade_v5_MinBlock = {$IFDEF PRODUCTION}999999999{$ELSE}50{$ENDIF}; // TODO Need define v5 for production!
 
 
-  CT_MagicNetIdentification = {$IFDEF PRODUCTION}$0A043580{$ELSE}$04000000{$ENDIF}; // Unix timestamp 168048000 ... It's Albert birthdate!
+  CT_MagicNetIdentification = {$IFDEF PRODUCTION}$0A043580{$ELSE}$05000001{$ENDIF}; // Unix timestamp 168048000 ... It's Albert birthdate!
 
-  CT_NetProtocol_Version: Word = $0007;
+  CT_NetProtocol_Version: Word = $0009; // Version 4.0.2 Will allow only net protocol 9
   // IMPORTANT NOTE!!!
   // NetProtocol_Available MUST BE always >= NetProtocol_version
   CT_NetProtocol_Available: Word = {$IFDEF PRODUCTION}$0009{$ELSE}$0009{$ENDIF};  // Version 4.0.0 will start accepting protocol 8 but 4.0.1 will accept 9 due to 4.0.0 bug
@@ -128,7 +136,7 @@ Const
 
   CT_SafeBoxBankVersion : Word = 3; // Protocol 2 upgraded safebox version from 2 to 3
 
-  CT_MagicIdentificator: AnsiString = {$IFDEF PRODUCTION}'PascalCoin'{$ELSE}'PascalCoinTESTNET'{$ENDIF}; //
+  CT_MagicIdentificator: String = {$IFDEF PRODUCTION}'PascalCoin'{$ELSE}'PascalCoinTESTNET_5.Beta.1'{$ENDIF}; //
 
   CT_PseudoOp_Reward = $0;
   // Value of Operations type in Protocol 1
@@ -148,6 +156,9 @@ Const
 
   CT_Protocol_v3_PIP11_Percent = 20; // PIP-0011 20% Percent proposed and voted by PIP-0011
 
+  CT_Hardcoded_RandomHash_Table_Filename = 'HardcodedRH_75800.randomhash';
+  CT_Hardcoded_RandomHash_Table_HASH = '0A56291E8368AC855227B67A2F6CBEEFD2DB4CAE3CB8A473A7F6663C63368D0E';
+
   CT_PseudoOpSubtype_Miner                = 1;
   CT_PseudoOpSubtype_Developer            = 2;
 
@@ -156,10 +167,15 @@ Const
   CT_OpSubtype_BuyTransactionBuyer        = 13;
   CT_OpSubtype_BuyTransactionTarget       = 14;
   CT_OpSubtype_BuyTransactionSeller       = 15;
+  CT_OpSubtype_SwapTransactionSender      = 16;
+  CT_OpSubtype_SwapTransactionTarget      = 17;
+  CT_OpSubtype_SwapTransactionReceiver    = 18;
   CT_OpSubtype_ChangeKey                  = 21;
   CT_OpSubtype_Recover                    = 31;
   CT_OpSubtype_ListAccountForPublicSale   = 41;
   CT_OpSubtype_ListAccountForPrivateSale  = 42;
+  CT_OpSubtype_ListAccountForAccountSwap  = 43;
+  CT_OpSubtype_ListAccountForCoinSwap     = 44;
   CT_OpSubtype_DelistAccount              = 51;
   CT_OpSubtype_BuyAccountBuyer            = 61;
   CT_OpSubtype_BuyAccountTarget           = 62;
@@ -173,15 +189,15 @@ Const
   CT_OpSubtype_Data_Signer                = 103;
   CT_OpSubtype_Data_Receiver              = 104;
 
-  CT_ClientAppVersion : AnsiString = {$IFDEF PRODUCTION}'4.0.1'{$ELSE}{$IFDEF TESTNET}'TESTNET 4.0.1'{$ELSE}{$ENDIF}{$ENDIF};
+  CT_ClientAppVersion : String = {$IFDEF PRODUCTION}'4.1'{$ELSE}{$IFDEF TESTNET}'TESTNET 5.Beta.1'{$ELSE}{$ENDIF}{$ENDIF};
 
   CT_Discover_IPs = {$IFDEF PRODUCTION}'bpascal1.dynamic-dns.net;bpascal2.dynamic-dns.net;pascalcoin1.dynamic-dns.net;pascalcoin2.dynamic-dns.net;pascalcoin1.dns1.us;pascalcoin2.dns1.us;pascalcoin1.dns2.us;pascalcoin2.dns2.us'
                     {$ELSE}'pascaltestnet1.dynamic-dns.net;pascaltestnet2.dynamic-dns.net;pascaltestnet1.dns1.us;pascaltestnet2.dns1.us'{$ENDIF};
 
-  CT_TRUE_FALSE : Array[Boolean] Of AnsiString = ('FALSE','TRUE');
+  CT_TRUE_FALSE : Array[Boolean] Of String = ('FALSE','TRUE');
 
-  CT_MAX_0_fee_operations_per_block_by_miner = {$IFDEF PRODUCTION}2000{$ELSE}{$IFDEF TESTNET}2000{$ELSE}{$ENDIF}{$ENDIF};
-  CT_MAX_Operations_per_block_by_miner =  {$IFDEF PRODUCTION}20000{$ELSE}{$IFDEF TESTNET}50000{$ELSE}{$ENDIF}{$ENDIF};
+  CT_MAX_0_fee_operations_per_block_by_miner = {$IFDEF PRODUCTION}30000{$ELSE}{$IFDEF TESTNET}3000{$ELSE}{$ENDIF}{$ENDIF};
+  CT_MAX_Operations_per_block_by_miner =  {$IFDEF PRODUCTION}500000{$ELSE}{$IFDEF TESTNET}50000{$ELSE}{$ENDIF}{$ENDIF};
 
   CT_MAX_MultiOperation_Senders = 100;
   CT_MAX_MultiOperation_Receivers = 1000;

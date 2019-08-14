@@ -58,7 +58,7 @@ type
   end;
 
 Const
-  CT_MINER_VERSION = {$IFDEF PRODUCTION}'4.0'{$ELSE}{$IFDEF TESTNET}'4.0 TESTNET'{$ELSE}ERROR{$ENDIF}{$ENDIF};
+  CT_MINER_VERSION = {$IFDEF PRODUCTION}'5.0'{$ELSE}{$IFDEF TESTNET}'5.0 TESTNET'{$ELSE}ERROR{$ENDIF}{$ENDIF};
   CT_Line_DeviceStatus = 3;
   CT_Line_ConnectionStatus = 4;
   CT_Line_MinerValues = 7;
@@ -136,7 +136,7 @@ begin
     If TCustomMinerDeviceThread(Sender).MinerValuesForWork.block>0 then begin
       WriteLine(CT_Line_MinerValues,Format('Current block: %d Wallet Name: "%s" Target: %s',
         [TCustomMinerDeviceThread(Sender).MinerValuesForWork.block,
-         FPoolMinerThread.GlobalMinerValuesForWork.payload_start,
+         FPoolMinerThread.GlobalMinerValuesForWork.payload_start.ToPrintable,
          IntToHex(TCustomMinerDeviceThread(Sender).MinerValuesForWork.target,8)
          ]));
     end;
@@ -146,7 +146,7 @@ end;
 procedure TPascalMinerApp.OnFoundNOnce(Sender: TCustomMinerDeviceThread; Timestamp, nOnce: Cardinal);
 begin
   WriteLine(CT_Line_LastFound + FDeviceThreads.Count,FormatDateTime('hh:nn:ss',now)+' Block:'+IntToStr(Sender.MinerValuesForWork.block)+' NOnce:'+Inttostr(nOnce)+
-    ' Timestamp:'+inttostr(Timestamp)+' Miner:'+Sender.MinerValuesForWork.payload_start);
+    ' Timestamp:'+inttostr(Timestamp)+' Miner:'+Sender.MinerValuesForWork.payload_start.ToPrintable);
 end;
 
 procedure TPascalMinerApp.WriteLine(nline: Integer; txt: String);
@@ -218,8 +218,8 @@ var
     end;
     if HasOption('c','cpu') then begin
       c := StrToIntDef(GetOptionValue('c','cpu'),-1);
-      if (c<=0) or (c>TLogicalCPUCount.GetLogicalCPUCount()) then begin
-        WriteLn('Invalid cpu value ',c,'. Valid values: 1..',TLogicalCPUCount.GetLogicalCPUCount());
+      if (c<=0) or (c>TCPUTool.GetLogicalCPUCount()) then begin
+        WriteLn('Invalid cpu value ',c,'. Valid values: 1..',TCPUTool.GetLogicalCPUCount());
         Terminate;
         exit;
       end;
@@ -298,12 +298,12 @@ var
               else hrHashing := 0;
               gs := devt.GlobalDeviceStats;
               If ms.RoundsCount>0 then begin
-                s := FormatDateTime('hh:nn:ss',now)+Format(' Miner:"%s" at %0.1f H/s - Rounds: %0.2f K Found: %d',[devt.MinerValuesForWork.payload_start,hrHashing, gs.RoundsCount/1000, gs.WinsCount]);
+                s := FormatDateTime('hh:nn:ss',now)+Format(' Miner:"%s" at %0.1f H/s - Rounds: %0.2f K Found: %d',[devt.MinerValuesForWork.payload_start.ToString,hrHashing, gs.RoundsCount/1000, gs.WinsCount]);
                 If (gs.Invalids>0) then s := s +' '+inttostr(gs.Invalids)+' ERRORS!';
                 WriteLine(CT_Line_MiningStatus+i,s);
               end else begin
                 If gs.RoundsCount>0 then begin
-                  s := FormatDateTime('hh:nn:ss',now)+Format(' Miner:"%s" **NOT MINING** - Rounds: %0.2f K Found: %d',[devt.MinerValuesForWork.payload_start,gs.RoundsCount/1000, gs.WinsCount]);
+                  s := FormatDateTime('hh:nn:ss',now)+Format(' Miner:"%s" **NOT MINING** - Rounds: %0.2f K Found: %d',[devt.MinerValuesForWork.payload_start.ToString,gs.RoundsCount/1000, gs.WinsCount]);
                   If (gs.Invalids>0) then s := s +' '+inttostr(gs.Invalids)+' ERRORS!';
                 end else begin
                   s := FormatDateTime('hh:nn:ss',now)+' Not mining...';
@@ -315,12 +315,12 @@ var
               else hrHashing := 0;
               gs := devt.GlobalDeviceStats;
               If ms.RoundsCount>0 then begin
-                s := FormatDateTime('hh:nn:ss',now)+Format(' Miner:"%s" at %0.2f MH/s - Rounds: %0.2f G Found: %d',[devt.MinerValuesForWork.payload_start,hrHashing, gs.RoundsCount/1000000000, gs.WinsCount]);
+                s := FormatDateTime('hh:nn:ss',now)+Format(' Miner:"%s" at %0.2f MH/s - Rounds: %0.2f G Found: %d',[devt.MinerValuesForWork.payload_start.ToString,hrHashing, gs.RoundsCount/1000000000, gs.WinsCount]);
                 If (gs.Invalids>0) then s := s +' '+inttostr(gs.Invalids)+' ERRORS!';
                 WriteLine(CT_Line_MiningStatus+i,s);
               end else begin
                 If gs.RoundsCount>0 then begin
-                  s := FormatDateTime('hh:nn:ss',now)+Format(' Miner:"%s" **NOT MINING** - Rounds: %0.2f G Found: %d',[devt.MinerValuesForWork.payload_start,gs.RoundsCount/1000000000, gs.WinsCount]);
+                  s := FormatDateTime('hh:nn:ss',now)+Format(' Miner:"%s" **NOT MINING** - Rounds: %0.2f G Found: %d',[devt.MinerValuesForWork.payload_start.ToString,gs.RoundsCount/1000000000, gs.WinsCount]);
                   If (gs.Invalids>0) then s := s +' '+inttostr(gs.Invalids)+' ERRORS!';
                 end else begin
                   s := FormatDateTime('hh:nn:ss',now)+' Not mining...';

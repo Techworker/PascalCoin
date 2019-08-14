@@ -39,6 +39,7 @@ Type
 
   TFileStorage = Class(TStorage)
   private
+    FLowMemoryUsage: Boolean;
     FStorageLock : TPCCriticalSection;
     FBlockChainStream : TFileStream;
     FPendingBufferOperationsStream : TFileStream;
@@ -66,7 +67,7 @@ Type
     Function DoSaveBank : Boolean; override;
     Function DoRestoreBank(max_block : Int64; restoreProgressNotify : TProgressNotify) : Boolean; override;
     Procedure DoDeleteBlockChainBlocks(StartingDeleteBlock : Cardinal); override;
-    Function BlockExists(Block : Cardinal) : Boolean; override;
+    Function DoBlockExists(Block : Cardinal) : Boolean; override;
     Function LockBlockChainStream : TFileStream;
     Procedure UnlockBlockChainStream;
     Function LoadBankFileInfo(Const Filename : AnsiString; var safeBoxHeader : TPCSafeBoxHeader) : Boolean;
@@ -86,6 +87,7 @@ Type
     Procedure SetBlockChainFile(BlockChainFileName : AnsiString);
     Function HasUpgradedToVersion2 : Boolean; override;
     Procedure CleanupVersion1Data; override;
+    property LowMemoryUsage : Boolean read FLowMemoryUsage write FLowMemoryUsage;
   End;
 
 implementation
@@ -127,7 +129,7 @@ Const CT_TBlockHeader_NUL : TBlockHeader = (BlockNumber:0;StreamBlockRelStartPos
 
   }
 
-function TFileStorage.BlockExists(Block: Cardinal): Boolean;
+function TFileStorage.DoBlockExists(Block: Cardinal): Boolean;
 Var  iBlockHeaders : Integer;
   BlockHeaderFirstBlock : Cardinal;
   stream : TStream;
@@ -208,6 +210,7 @@ end;
 constructor TFileStorage.Create(AOwner: TComponent);
 begin
   inherited;
+  FLowMemoryUsage := False;
   FDatabaseFolder := '';
   FBlockChainFileName := '';
   FBlockChainStream := Nil;
@@ -303,7 +306,7 @@ begin
     fs.Position:=0;
     fs.Size:=0;
     OperationsHashTree.SaveOperationsHashTreeToStream(fs,true);
-    TLog.NewLog(ltdebug,ClassName,Format('DoSavePendingBufferOperations operations:%d',[OperationsHashTree.OperationsCount]));
+    {$IFDEF HIGHLOG}TLog.NewLog(ltdebug,ClassName,Format('DoSavePendingBufferOperations operations:%d',[OperationsHashTree.OperationsCount]));{$ENDIF}
   finally
     UnlockBlockChainStream;
   end;
@@ -311,16 +314,21 @@ end;
 
 procedure TFileStorage.DoLoadPendingBufferOperations(OperationsHashTree : TOperationsHashTree);
 Var fs : TFileStream;
-  errors : AnsiString;
+  errors : String;
   n : Integer;
+  LCurrentProtocol : Word;
 begin
   LockBlockChainStream;
   Try
     fs := GetPendingBufferOperationsStream;
     fs.Position:=0;
-    If OperationsHashTree.LoadOperationsHashTreeFromStream(fs,true,CT_PROTOCOL_3,Nil,errors) then begin
-      TLog.NewLog(ltInfo,ClassName,Format('DoLoadPendingBufferOperations loaded operations:%d',[OperationsHashTree.OperationsCount]));
-    end else TLog.NewLog(ltError,ClassName,Format('DoLoadPendingBufferOperations ERROR: loaded operations:%d errors:%s',[OperationsHashTree.OperationsCount,errors]));
+    if fs.Size>0 then begin
+      if Assigned(Bank) then LCurrentProtocol := Bank.SafeBox.CurrentProtocol
+      else LCurrentProtocol := CT_BUILD_PROTOCOL;
+      If OperationsHashTree.LoadOperationsHashTreeFromStream(fs,true,LCurrentProtocol,Nil,errors) then begin
+        TLog.NewLog(ltInfo,ClassName,Format('DoLoadPendingBufferOperations loaded operations:%d',[OperationsHashTree.OperationsCount]));
+      end else TLog.NewLog(ltError,ClassName,Format('DoLoadPendingBufferOperations ERROR (Protocol %d): loaded operations:%d errors:%s',[LCurrentProtocol,OperationsHashTree.OperationsCount,errors]));
+    end;
   finally
     UnlockBlockChainStream;
   end;
@@ -447,7 +455,7 @@ var
     filename,auxfn : AnsiString;
     fs : TFileStream;
     ms : TMemoryStream;
-    errors : AnsiString;
+    errors : String;
     blockscount : Cardinal;
     sbHeader, goodSbHeader : TPCSafeBoxHeader;
 begin
@@ -462,7 +470,7 @@ begin
         if (sr.Attr and FileAttrs) = FileAttrs then begin
           auxfn := folder+PathDelim+sr.Name;
           If LoadBankFileInfo(auxfn,sbHeader) then begin
-            if (((max_block<0) Or (sbHeader.blocksCount<=max_block)) AND (sbHeader.blocksCount>blockscount)) And
+            if (((max_block<0) Or (sbHeader.endBlock<=max_block)) AND (sbHeader.blocksCount>blockscount)) And
               (sbHeader.startBlock=0) And (sbHeader.endBlock=sbHeader.startBlock+sbHeader.blocksCount-1) then begin
               filename := auxfn;
               blockscount := sbHeader.blocksCount;
@@ -477,17 +485,23 @@ begin
       TLog.NewLog(ltinfo,Self.ClassName,'Loading SafeBox protocol:'+IntToStr(goodSbHeader.protocol)+' with '+inttostr(blockscount)+' blocks from file '+filename);
       fs := TFileStream.Create(filename,fmOpenRead);
       try
-        ms := TMemoryStream.Create;
-        Try
-          ms.CopyFrom(fs,0);
-          fs.Position := 0;
-          ms.Position := 0;
-          if not Bank.LoadBankFromStream(ms,False,'',restoreProgressNotify,errors) then begin
+        fs.Position := 0;
+        if LowMemoryUsage then begin
+          if not Bank.LoadBankFromStream(fs,False,Nil,Nil,restoreProgressNotify,errors) then begin
             TLog.NewLog(lterror,ClassName,'Error reading bank from file: '+filename+ ' Error: '+errors);
           end;
-        Finally
-          ms.Free;
-        End;
+        end else begin
+          ms := TMemoryStream.Create;
+          Try
+            ms.CopyFrom(fs,0);
+            ms.Position := 0;
+            if not Bank.LoadBankFromStream(ms,False,Nil,Nil,restoreProgressNotify,errors) then begin
+              TLog.NewLog(lterror,ClassName,'Error reading bank from file: '+filename+ ' Error: '+errors);
+            end;
+          Finally
+            ms.Free;
+          End;
+        end;
       finally
         fs.Free;
       end;
@@ -509,14 +523,18 @@ begin
     fs := TFileStream.Create(bankfilename,fmCreate);
     try
       fs.Size := 0;
-      ms := TMemoryStream.Create;
-      try
-        Bank.SafeBox.SaveSafeBoxToAStream(ms,0,Bank.SafeBox.BlocksCount-1);
-        ms.Position := 0;
-        fs.Position := 0;
-        fs.CopyFrom(ms,0);
-      finally
-        ms.Free;
+      fs.Position:=0;
+      if LowMemoryUsage then begin
+        Bank.SafeBox.SaveSafeBoxToAStream(fs,0,Bank.SafeBox.BlocksCount-1);
+      end else begin
+        ms := TMemoryStream.Create;
+        try
+          Bank.SafeBox.SaveSafeBoxToAStream(ms,0,Bank.SafeBox.BlocksCount-1);
+          ms.Position := 0;
+          fs.CopyFrom(ms,0);
+        finally
+          ms.Free;
+        end;
       end;
     finally
       fs.Free;
@@ -560,7 +578,7 @@ begin
   Finally
     UnlockBlockChainStream;
   End;
-  if Assigned(Bank) then SaveBank;
+  if Assigned(Bank) then SaveBank(False);
 end;
 
 Const CT_SafeboxsToStore = 10;
@@ -569,8 +587,12 @@ class function TFileStorage.GetSafeboxCheckpointingFileName(const BaseDataFolder
 begin
   Result := '';
   If not ForceDirectories(BaseDataFolder) then exit;
-  // We will store checkpointing
-  Result := BaseDataFolder + PathDelim+'checkpoint'+ inttostr((block DIV CT_BankToDiskEveryNBlocks) MOD CT_SafeboxsToStore)+'.safebox';
+  if TPCSafeBox.MustSafeBoxBeSaved(block) then begin
+    // We will store checkpointing
+    Result := BaseDataFolder + PathDelim+'checkpoint'+ inttostr((block DIV CT_BankToDiskEveryNBlocks) MOD CT_SafeboxsToStore)+'.safebox';
+  end else begin
+    Result := BaseDataFolder + PathDelim+'checkpoint_'+inttostr(block)+'.safebox';
+  end;
 end;
 
 function TFileStorage.GetBlockHeaderFirstBytePosition(Stream : TStream; Block: Cardinal; CanInitialize : Boolean; var iBlockHeaders : Integer; var BlockHeaderFirstBlock: Cardinal): Boolean;
@@ -884,7 +906,7 @@ end;
 
 function TFileStorage.StreamBlockRead(Stream : TStream; iBlockHeaders : Integer; BlockHeaderFirstBlock, Block : Cardinal; Operations : TPCOperationsComp) : Boolean;
 Var p : Int64;
-  errors : AnsiString;
+  errors : String;
   streamFirstBlock,
   _BlockSizeC,
   _intBlockIndex : Cardinal;
