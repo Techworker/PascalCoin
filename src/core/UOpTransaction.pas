@@ -521,7 +521,7 @@ begin
     Exit;
   end;
   if (account_signer.balance<FData.fee) then begin
-    errors := 'Insuficient funds';
+    errors := 'Insufficient funds';
     exit;
   end;
   if (length(FData.payload)>CT_MaxPayloadSize) then begin
@@ -1428,7 +1428,7 @@ begin
     Exit;
   end;
   if (account_signer.balance<FData.fee) then begin
-    errors := 'Insuficient founds';
+    errors := 'Insufficient founds';
     exit;
   end;
   if (length(FData.payload)>CT_MaxPayloadSize) then begin
@@ -1746,7 +1746,7 @@ begin
     exit;
   end;
   if (acc.balance<FData.fee) then begin
-    errors := 'Insuficient funds';
+    errors := 'Insufficient funds';
     exit;
   end;
   if Not TAccountComp.IsValidAccountKey(FData.new_accountkey,errors) then begin
@@ -2009,7 +2009,7 @@ begin
     Exit;
   end;
   if (account_signer.balance<FData.fee) then begin
-    errors := 'Insuficient founds';
+    errors := 'Insufficient funds';
     exit;
   end;
   if (length(FData.payload)>CT_MaxPayloadSize) then begin
